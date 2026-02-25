@@ -38,16 +38,12 @@ from app.ingestion.base import (
     CONSUMER_QUEUE_SIZE,
     ERROR_BACKOFF_S,
     CONTACT_INTERVAL_S,
+    STARTUP_FROM_DATE,
     log,
 )
 
 # Fixed start date for the startup backfill.
 # On every service start, contacts are fetched from this date to NOW.
-# Override via env var: CONTACT_STARTUP_FROM_DATE=2024-06-01
-CONTACT_STARTUP_FROM_DATE: str = os.getenv(
-    "CONTACT_STARTUP_FROM_DATE", "2024-01-01"
-)
-
 # Use a child logger for contacts
 log = logging.getLogger("ingestion.contacts")
 
@@ -97,9 +93,9 @@ class ContactWorker:
                     updated_at              timestamptz DEFAULT now()
                 )
             """)
-            await conn.execute("""
+            await conn.execute(f"""
                 INSERT INTO ingestion_state (id, last_external_timestamp)
-                VALUES (2, '2024-01-01 00:00:00+00'::timestamptz)
+                VALUES (2, '{STARTUP_FROM_DATE}'::timestamptz)
                 ON CONFLICT (id) DO NOTHING
             """)
         log.info("✓ ingestion_state table ready (contacts, id=2)")
@@ -112,7 +108,7 @@ class ContactWorker:
             )
             if row and row["last_external_timestamp"]:
                 return row["last_external_timestamp"]
-            return datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
+            return datetime.datetime.fromisoformat(STARTUP_FROM_DATE.replace("Z", "+00:00"))
 
     async def update_checkpoint(self, max_ts: datetime.datetime) -> None:
         """
@@ -338,7 +334,7 @@ class ContactWorker:
         Contact ingestion lifecycle:
 
             PHASE 1 — Startup backfill (every restart):
-                from_ts = NOW − CONTACT_STARTUP_BACKFILL_DAYS (default 30)
+                from_ts = STARTUP_FROM_DATE (default 2024-01-01)
                 until_ts = NOW
                 Run one full sweep via parallel chunks.
                 Update checkpoint to MAX(updated_at) seen.
@@ -366,17 +362,19 @@ class ContactWorker:
         # ── PHASE 1: Startup backfill (fixed date → NOW) ─────────────────────
         log.info(
             f"🔄 [STARTUP BACKFILL] Fetching all contacts from "
-            f"{CONTACT_STARTUP_FROM_DATE} to NOW..."
+            f"{STARTUP_FROM_DATE} to NOW..."
         )
         try:
             now_utc = datetime.datetime.now(datetime.timezone.utc)
-            # from_date is the fixed historical start date
-            backfill_from_str = f"{CONTACT_STARTUP_FROM_DATE}T00:00:00Z"
+            # from_date is normalized during module initialization
+            backfill_from_str = STARTUP_FROM_DATE
             backfill_until_str = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-            log.info(
-                f"[STARTUP BACKFILL] range={backfill_from_str}→{backfill_until_str}"
-            )
+            log.info("-" * 40)
+            log.info("CONTACT STARTUP BACKFILL")
+            log.info(f"Target Start Date:  {STARTUP_FROM_DATE}")
+            log.info(f"Effective Range:    {backfill_from_str} → {backfill_until_str}")
+            log.info("-" * 40)
 
             max_ts = await self.run_raw_ingestion(backfill_from_str, backfill_until_str)
 

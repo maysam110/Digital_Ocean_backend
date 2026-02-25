@@ -80,6 +80,20 @@ SEQUENTIAL_RETRY_TIMEOUT_S = int(os.getenv("INGEST_RETRY_TIMEOUT", "600"))  # 10
 ERROR_BACKOFF_S = 300  # 5 minutes wait on error
 CONTACT_INTERVAL_S = int(os.getenv("CONTACT_INTERVAL_MINUTES", "60")) * 60
 
+# Fixed start date for the startup backfill and initial checkpoint.
+# On every service start, data is fetched from this date to NOW.
+def _get_startup_date() -> str:
+    """Read and normalize the startup date from environment."""
+    # Check for generic STARTUP_FROM_DATE first, then legacy CONTACT_STARTUP_FROM_DATE
+    raw = os.getenv("STARTUP_FROM_DATE") or os.getenv("CONTACT_STARTUP_FROM_DATE", "2024-01-01")
+    raw = raw.strip()
+    # Handle YYYY-MM-DD
+    if len(raw) == 10:
+        return f"{raw}T00:00:00Z"
+    return raw
+
+STARTUP_FROM_DATE: str = _get_startup_date()
+
 
 # ===========================================================================
 # Async Rate Limiter

@@ -20,12 +20,13 @@ import asyncio
 import datetime
 import json
 import logging
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple, Any
 
 from app.ingestion.base import (
     DB,
     TurnClient,
     extract_message_timestamp,
+    STARTUP_FROM_DATE,
     log,
 )
 
@@ -106,9 +107,9 @@ class MessageWorker:
                     updated_at              timestamptz DEFAULT now()
                 )
             """)
-            await conn.execute("""
+            await conn.execute(f"""
                 INSERT INTO ingestion_state (id, last_external_timestamp)
-                VALUES (1, '2024-01-01 00:00:00+00'::timestamptz)
+                VALUES (1, '{STARTUP_FROM_DATE}'::timestamptz)
                 ON CONFLICT (id) DO NOTHING
             """)
         log.info("✓ ingestion_state table ready (messages, id=1)")
@@ -177,7 +178,7 @@ class MessageWorker:
             )
             if row and row["last_external_timestamp"]:
                 return row["last_external_timestamp"]
-            return datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
+            return datetime.datetime.fromisoformat(STARTUP_FROM_DATE.replace("Z", "+00:00"))
 
     async def update_checkpoint(self, max_ts: datetime.datetime) -> None:
         """
@@ -340,6 +341,7 @@ class MessageWorker:
         from_date: str,
         until_date: str,
         mode: str,
+        on_progress_ts: Optional[Callable[[datetime.datetime], Any]] = None,
     ) -> Tuple[int, int, Optional[datetime.datetime]]:
         """
         Fetch messages from Turn.io and insert into ``webhook_events``.
@@ -424,6 +426,10 @@ class MessageWorker:
                     if scanned % 500 == 0:
                         log.info(f"  [{mode}] fetched {scanned:,} messages so far …")
 
+                    # Periodic checkpoint update (avoid timeout loss)
+                    if on_progress_ts and scanned % 1000 == 0 and max_ts:
+                        await on_progress_ts(max_ts)
+
             except Exception as exc:
                 log.error(f"❌ [{mode}] Fetch failed: {exc}", exc_info=True)
                 raise
@@ -453,6 +459,7 @@ class MessageWorker:
         from_date: str,
         until_date: str,
         mode: str,
+        on_progress_ts: Optional[Callable[[datetime.datetime], Any]] = None,
     ) -> Tuple[int, int, Optional[datetime.datetime]]:
         """
         Timeout-protected wrapper around ``fetch_and_insert``.
@@ -465,7 +472,7 @@ class MessageWorker:
         """
         try:
             return await asyncio.wait_for(
-                self.fetch_and_insert(from_date, until_date, mode),
+                self.fetch_and_insert(from_date, until_date, mode, on_progress_ts=on_progress_ts),
                 timeout=self.FETCH_TIMEOUT,
             )
         except asyncio.TimeoutError:
@@ -544,7 +551,8 @@ class MessageWorker:
 
                 async with self.api_lock:
                     scanned, inserted, max_ts = await self.safe_fetch_and_insert(
-                        from_date, until_date, "INCREMENTAL"
+                        from_date, until_date, "INCREMENTAL",
+                        on_progress_ts=self.update_checkpoint
                     )
 
                 self.stats["total_scanned"] += scanned
