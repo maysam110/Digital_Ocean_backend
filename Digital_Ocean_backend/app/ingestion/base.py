@@ -86,6 +86,11 @@ def _get_startup_date() -> str:
     """Read and normalize the startup date from environment."""
     # Check for generic STARTUP_FROM_DATE first, then legacy CONTACT_STARTUP_FROM_DATE
     raw = os.getenv("STARTUP_FROM_DATE") or os.getenv("CONTACT_STARTUP_FROM_DATE", "2024-01-01")
+    
+    # CRITICAL: Strip out inline comments (e.g., "2024-01-01 # comment")
+    if "#" in raw:
+        raw = raw.split("#")[0]
+        
     raw = raw.strip()
     # Handle YYYY-MM-DD
     if len(raw) == 10:
