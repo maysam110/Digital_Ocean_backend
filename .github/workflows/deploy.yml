@@ -24,7 +24,7 @@ jobs:
 
       - name: Build and Push Image (AMD64)
         run: |
-          cd Digital_Ocean_backend/Digital_Ocean_backend
+          cd Digital_Ocean_backend
           docker buildx build \
             --platform linux/amd64 \
             -t circlewomen/turn-backend:latest \
