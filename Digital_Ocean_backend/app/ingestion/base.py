@@ -68,7 +68,7 @@ DB_NAME = os.getenv("DB_NAME")
 # ---------------------------------------------------------------------------
 MAX_RETRIES = 8                  # universal retry limit
 CURSOR_MAX_RETRIES = 10          # cursor-expiry retries per chunk
-NUM_CHUNKS = int(os.getenv("INGEST_NUM_CHUNKS", "12"))
+NUM_CHUNKS = int(os.getenv("INGEST_NUM_CHUNKS", "24"))
 BATCH_SIZE = int(os.getenv("INGEST_BATCH_SIZE", "1000"))
 NUM_CONSUMERS = int(os.getenv("INGEST_NUM_CONSUMERS", "5"))
 CHUNK_LAUNCH_DELAY_S = 1         # delay between each chunk launch
@@ -730,6 +730,9 @@ class TurnContactClient:
                         contacts = data.get("contacts", [])
 
                     for contact in contacts:
+                        if fetch_queue.full():
+                            log.warning(f"  ⚠️ Chunk-{chunk_id}: Queue full ({fetch_queue.qsize()} items), waiting for consumers...")
+                        
                         await fetch_queue.put(contact)
                         chunk_count += 1
                         # Track latest timestamp for cursor recovery

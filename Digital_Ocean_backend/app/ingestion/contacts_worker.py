@@ -235,6 +235,8 @@ class ContactWorker:
                         except (ValueError, TypeError):
                             pass
 
+                    if ingest_queue.full():
+                        log.warning(f"  ⚠️ [CONTACTS] Ingest queue full, waiting for DB flush...")
                     await ingest_queue.put(
                         ("turn_io", "contact", ext_id, contact)
                     )

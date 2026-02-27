@@ -93,6 +93,9 @@ class IngestionManager:
             lambda t: self._on_worker_done("ContactWorker", t)
         )
 
+        # 4. Heartbeat task to show system health in logs even during long waits
+        asyncio.create_task(self._heartbeat())
+
         # 3. Launch MessageWorker with a stagger delay to avoid resource contention
         # on startup (especially if both do backfills).
         log.info(f"⏳ MessageWorker will start after {STARTUP_STAGGER_S}s stagger delay...")
@@ -140,6 +143,12 @@ class IngestionManager:
                 f"⚠️  [{name}] Worker has stopped. "
                 f"Container restart will recover this worker."
             )
+
+    async def _heartbeat(self) -> None:
+        """Periodic log to confirm the manager is alive."""
+        while True:
+            await asyncio.sleep(300)  # 5 minutes
+            log.info("💓 [HEARTBEAT] IngestionManager is running and monitoring workers...")
 
     async def _run_staggered_message_worker(self) -> None:
         """Wait for stagger delay then run MessageWorker."""

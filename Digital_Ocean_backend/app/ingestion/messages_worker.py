@@ -59,7 +59,7 @@ class MessageWorker:
     ERROR_BACKOFF: int = 10
     RECOVERY_CHECK_INTERVAL: int = 600
     AUDIT_CHECK_INTERVAL: int = 3600
-    FETCH_TIMEOUT: int = 3600              # 1 hour max per fetch (large catch-ups need time)
+    FETCH_TIMEOUT: int = 7200              # 2 hours max per fetch (large catch-ups need time)
     MIN_CHECKPOINT_ADVANCE: int = 1        # minimum seconds to advance
     LAG_RECOVERY_THRESHOLD: int = 300      # aggressive catch-up at 5 min
     LAG_WATCHDOG_THRESHOLD: int = 900      # emergency recovery at 15 min
@@ -421,6 +421,8 @@ class MessageWorker:
                         await asyncio.sleep(0.01)
 
                     # Enqueue message event
+                    if queue.full():
+                        log.warning(f"  ⚠️ [{mode}] Ingest queue full, waiting for DB flush...")
                     await queue.put(("turn_io", "message", ext_id, msg))
                     scanned += 1
 
