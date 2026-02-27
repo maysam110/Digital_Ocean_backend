@@ -70,7 +70,7 @@ MAX_RETRIES = 8                  # universal retry limit
 CURSOR_MAX_RETRIES = 10          # cursor-expiry retries per chunk
 NUM_CHUNKS = int(os.getenv("INGEST_NUM_CHUNKS", "12"))
 BATCH_SIZE = int(os.getenv("INGEST_BATCH_SIZE", "1000"))
-NUM_CONSUMERS = 3
+NUM_CONSUMERS = int(os.getenv("INGEST_NUM_CONSUMERS", "5"))
 CHUNK_LAUNCH_DELAY_S = 1         # delay between each chunk launch
 PRODUCER_QUEUE_SIZE = int(os.getenv("INGEST_PRODUCER_QUEUE_SIZE", "50000"))
 CONSUMER_QUEUE_SIZE = int(os.getenv("INGEST_CONSUMER_QUEUE_SIZE", "30000"))
@@ -79,6 +79,7 @@ SEQUENTIAL_RETRY_TIMEOUT_S = int(os.getenv("INGEST_RETRY_TIMEOUT", "600"))  # 10
 # Continuous Mode Constants
 ERROR_BACKOFF_S = 300  # 5 minutes wait on error
 CONTACT_INTERVAL_S = int(os.getenv("CONTACT_INTERVAL_MINUTES", "60")) * 60
+STARTUP_STAGGER_S = int(os.getenv("STARTUP_STAGGER_SECONDS", "10"))
 
 # Fixed start date for the startup backfill and initial checkpoint.
 # On every service start, data is fetched from this date to NOW.

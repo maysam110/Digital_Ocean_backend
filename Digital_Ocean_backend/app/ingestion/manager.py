@@ -23,6 +23,7 @@ from app.ingestion.base import (
     AsyncRateLimiter,
     TURN_API_URL,
     TURN_BEARER_TOKEN,
+    STARTUP_STAGGER_S,
     log,
 )
 from app.ingestion.messages_worker import MessageWorker
@@ -84,19 +85,20 @@ class IngestionManager:
         self.contact_worker = ContactWorker(self.db, self.contact_client)
 
         # 3. Launch both as isolated asyncio tasks with crash monitoring
-        self._msg_task = asyncio.create_task(
-            self._run_worker("MessageWorker", self.message_worker),
-            name="message-worker"
-        )
-        self._msg_task.add_done_callback(
-            lambda t: self._on_worker_done("MessageWorker", t)
-        )
         self._contact_task = asyncio.create_task(
             self._run_worker("ContactWorker", self.contact_worker),
             name="contact-worker"
         )
         self._contact_task.add_done_callback(
             lambda t: self._on_worker_done("ContactWorker", t)
+        )
+
+        # 3. Launch MessageWorker with a stagger delay to avoid resource contention
+        # on startup (especially if both do backfills).
+        log.info(f"⏳ MessageWorker will start after {STARTUP_STAGGER_S}s stagger delay...")
+        self._msg_task = asyncio.create_task(
+            self._run_staggered_message_worker(),
+            name="message-worker-staggered"
         )
 
         log.info("✓ Both workers launched as background tasks")
@@ -138,6 +140,17 @@ class IngestionManager:
                 f"⚠️  [{name}] Worker has stopped. "
                 f"Container restart will recover this worker."
             )
+
+    async def _run_staggered_message_worker(self) -> None:
+        """Wait for stagger delay then run MessageWorker."""
+        try:
+            await asyncio.sleep(STARTUP_STAGGER_S)
+            if self.message_worker:
+                await self._run_worker("MessageWorker", self.message_worker)
+        except asyncio.CancelledError:
+            log.info("[MessageWorker] Staggered start cancelled")
+        except Exception as exc:
+            log.error(f"❌ [MessageWorker] Staggered start failed: {exc}", exc_info=True)
 
     async def stop(self) -> None:
         """Graceful shutdown of all workers and resources."""
