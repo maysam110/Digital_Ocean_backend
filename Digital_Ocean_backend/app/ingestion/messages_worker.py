@@ -449,9 +449,19 @@ class MessageWorker:
             await producer_task
             producers_done.set()
             await asyncio.gather(*consumer_tasks)
-        except Exception as exc:
-            log.error(f"❌ [{mode}] Ingestion pipeline error: {exc}")
+        except (Exception, asyncio.CancelledError) as exc:
+            log.error(f"❌ [{mode}] Ingestion pipeline error or cancellation: {exc}")
+            # Ensure everything is cleaned up if we exit early (e.g. timeout)
+            producer_task.cancel()
+            for t in consumer_tasks:
+                t.cancel()
+            
+            # Wait for tasks to acknowledge cancellation
+            await asyncio.gather(producer_task, *consumer_tasks, return_exceptions=True)
             raise
+        finally:
+            # Double safety: set the event so consumers don't hang if they weren't cancelled
+            producers_done.set()
 
         return scanned, inserted, max_ts
 

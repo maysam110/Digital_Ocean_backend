@@ -271,14 +271,21 @@ class ContactWorker:
             producer_task = asyncio.create_task(contact_producer())
 
             await producer_task
-
             producers_done.set()
-
             await asyncio.gather(*consumer_tasks)
-
-        except Exception as e:
-            log.error(f"❌ Batch ingestion failed: {e}", exc_info=True)
+        except (Exception, asyncio.CancelledError) as exc:
+            log.error(f"❌ Contact ingestion pipeline error or cancellation: {exc}")
+            # Ensure everything is cleaned up if we exit early
+            producer_task.cancel()
+            for t in consumer_tasks:
+                t.cancel()
+            
+            # Wait for tasks to acknowledge cancellation
+            await asyncio.gather(producer_task, *consumer_tasks, return_exceptions=True)
             raise
+        finally:
+            # Double safety: set the event so consumers don't hang if they weren't cancelled
+            producers_done.set()
 
         log.info("\n" + "=" * 70)
         log.info(f"✅ CONTACT INGESTION CYCLE COMPLETE")
