@@ -375,7 +375,29 @@ class TurnClient:
                     cursor = await self._create_data_export_cursor(
                         "messages", last_message_ts, until_date,
                     )
+                    page_count = 0  # reset page counter for new cursor
                     continue
+                except httpx.HTTPStatusError as e:
+                    if 500 <= e.response.status_code < 600:
+                        cursor_retries += 1
+                        if cursor_retries > max_cursor_retries:
+                            log.error(
+                                f"❌ Persistent server errors after {cursor_retries} "
+                                f"cursor re-creations — giving up"
+                            )
+                            raise
+                        log.warning(
+                            f"🔄 Server {e.response.status_code} persisted after retries. "
+                            f"Re-creating cursor from last offset: {last_message_ts} "
+                            f"(attempt {cursor_retries}/{max_cursor_retries})"
+                        )
+                        await asyncio.sleep(30)  # cool-down before re-creating
+                        cursor = await self._create_data_export_cursor(
+                            "messages", last_message_ts, until_date,
+                        )
+                        page_count = 0
+                        continue
+                    raise
 
                 # Reset cursor-retry counter on every successful page
                 cursor_retries = 0
