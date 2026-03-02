@@ -297,10 +297,11 @@ class TurnClient:
                     if "cursor has expired" in body or ("cursor" in body and "expired" in body):
                         log.warning("⏰ Cursor expired — will re-create from last offset")
                         raise CursorExpiredError("Cursor has expired") from e
-                if e.response.status_code == 429:
+                if e.response.status_code == 429 or 500 <= e.response.status_code < 600:
                     wait_time = min(base_delay * (2 ** attempt), 60)
+                    msg = "Rate limit hit (429)" if e.response.status_code == 429 else f"Server error ({e.response.status_code})"
                     log.warning(
-                        f"⚠️  Rate limit hit (429) fetching page, retrying in {wait_time}s..."
+                        f"⚠️  {msg} fetching page, retrying in {wait_time}s..."
                     )
                     if attempt < max_retries - 1:
                         await asyncio.sleep(wait_time)
