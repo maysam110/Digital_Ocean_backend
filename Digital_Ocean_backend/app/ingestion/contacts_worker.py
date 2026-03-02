@@ -84,12 +84,26 @@ class ContactWorker:
 
     async def ensure_checkpoint(self) -> None:
         """Ensure ingestion_state row id=2 exists for contacts."""
+        try:
+            startup_ts = datetime.datetime.fromisoformat(
+                STARTUP_FROM_DATE.replace("Z", "+00:00")
+            )
+            if startup_ts.tzinfo is None:
+                startup_ts = startup_ts.replace(tzinfo=datetime.timezone.utc)
+        except ValueError:
+            # Defensive fallback: keep worker bootable even with malformed env value.
+            startup_ts = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
+            log.warning(
+                f"⚠️ Invalid STARTUP_FROM_DATE='{STARTUP_FROM_DATE}'. "
+                f"Falling back to {startup_ts.isoformat()} for checkpoint bootstrap."
+            )
+
         async with self.pool.acquire() as conn:
             await conn.execute("""
                 INSERT INTO ingestion_state (id, last_external_timestamp)
                 VALUES (2, $1::timestamptz)
                 ON CONFLICT (id) DO NOTHING
-            """, STARTUP_FROM_DATE)
+            """, startup_ts)
         log.info("✓ ingestion_state row ready (contacts, id=2)")
 
     async def get_checkpoint(self) -> datetime.datetime:
