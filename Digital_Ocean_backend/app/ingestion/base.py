@@ -211,7 +211,7 @@ class TurnClient:
 
         endpoint = f"/v1/data/{data_type}/cursor"
         url = f"{self.base_url}{endpoint}"
-        payload = {"from": from_date, "until": until_date, "ordering": "asc"}
+        payload = {"from": from_date, "until": until_date, "ordering": "asc", "limit": 100}
 
         log.info(f"Creating data export cursor for {data_type} from {from_date} to {until_date}...")
 
@@ -368,6 +368,28 @@ class TurnClient:
             async for msg in self._fetch_messages_single_cursor(from_date, until_date):
                 yield msg
 
+    @staticmethod
+    def _ts_to_iso(raw) -> Optional[str]:
+        """Convert a raw timestamp (Unix epoch or ISO string) to ISO format.
+
+        Returns an ISO string like '2025-06-25T04:04:07Z', or None if unparseable.
+        """
+        import datetime as _dtmod
+        if raw is None:
+            return None
+        # Already an ISO string
+        if isinstance(raw, str) and ('T' in raw or '-' in raw):
+            return raw
+        # Unix epoch (seconds or milliseconds)
+        try:
+            epoch = int(raw) if not isinstance(raw, int) else raw
+            if epoch > 1e12:
+                epoch = epoch / 1000.0
+            dt = _dtmod.datetime.fromtimestamp(epoch, tz=_dtmod.timezone.utc)
+            return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        except (ValueError, TypeError, OSError, OverflowError):
+            return None
+
     async def _fetch_messages_single_cursor(
         self,
         from_date: str,
@@ -389,7 +411,7 @@ class TurnClient:
             page_count = 0
             total_messages = 0
 
-            # Track the last message timestamp for cursor re-creation
+            # Track the last message timestamp as ISO string for cursor re-creation
             last_message_ts = from_date
             max_cursor_retries = 10  # prevent infinite re-creation loops
             cursor_retries = 0
@@ -454,17 +476,17 @@ class TurnClient:
                                 yield msg
                                 page_message_count += 1
                                 total_messages += 1
-                                # Track timestamp for cursor recovery
-                                ts = msg.get("timestamp")
-                                if ts:
-                                    last_message_ts = ts
+                                # Track timestamp for cursor recovery (must be ISO)
+                                ts_iso = self._ts_to_iso(msg.get("timestamp"))
+                                if ts_iso:
+                                    last_message_ts = ts_iso
                         elif "id" in data_item:
                             yield data_item
                             page_message_count += 1
                             total_messages += 1
-                            ts = data_item.get("timestamp")
-                            if ts:
-                                last_message_ts = ts
+                            ts_iso = self._ts_to_iso(data_item.get("timestamp"))
+                            if ts_iso:
+                                last_message_ts = ts_iso
 
                 log.info(f"✓ Page {page_count}: {page_message_count} messages (total: {total_messages})")
 
