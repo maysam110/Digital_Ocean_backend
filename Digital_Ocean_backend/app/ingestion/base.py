@@ -322,25 +322,64 @@ class TurnClient:
         """
         Fetch historical messages via the Data Export API.
 
-        Creates ONE cursor for the entire date range and paginates until
-        the ``paging.next`` cursor is absent or null.
-
-        **FIX**: Uses ``data.get("paging") or {}`` instead of
-        ``data.get("paging", {})`` because the Turn.io API can return
-        ``"paging": null`` (explicit null), which bypasses the default
-        value of ``dict.get``.
+        Automatically splits large date ranges into 7-day chunks to prevent
+        Turn.io server errors on massive exports. Each chunk creates its own
+        cursor and paginates independently.
 
         Yields:
             Individual message dicts.
         """
         from datetime import datetime as _dt, timedelta as _td
 
-        try:
-            if not from_date:
-                from_date = (_dt.utcnow() - _td(days=30)).replace(microsecond=0).isoformat() + "Z"
-            if not until_date:
-                until_date = _dt.utcnow().replace(microsecond=0).isoformat() + "Z"
+        if not from_date:
+            from_date = (_dt.utcnow() - _td(days=30)).replace(microsecond=0).isoformat() + "Z"
+        if not until_date:
+            until_date = _dt.utcnow().replace(microsecond=0).isoformat() + "Z"
 
+        # Parse dates to compute chunks
+        from_dt = _dt.fromisoformat(from_date.replace("Z", "+00:00"))
+        until_dt = _dt.fromisoformat(until_date.replace("Z", "+00:00"))
+
+        CHUNK_DAYS = 7
+        total_days = (until_dt - from_dt).total_seconds() / 86400
+
+        if total_days > CHUNK_DAYS:
+            # Split into 7-day chunks
+            chunk_start = from_dt
+            chunk_num = 0
+            total_chunks = int(total_days / CHUNK_DAYS) + 1
+            log.info(
+                f"📥 Date range spans {total_days:.0f} days — splitting into "
+                f"~{total_chunks} chunks of {CHUNK_DAYS} days each"
+            )
+            while chunk_start < until_dt:
+                chunk_end = min(chunk_start + _td(days=CHUNK_DAYS), until_dt)
+                chunk_num += 1
+                chunk_from = chunk_start.strftime("%Y-%m-%dT%H:%M:%SZ")
+                chunk_until = chunk_end.strftime("%Y-%m-%dT%H:%M:%SZ")
+                log.info(
+                    f"📦 Chunk {chunk_num}/{total_chunks}: "
+                    f"{chunk_from} → {chunk_until}"
+                )
+                async for msg in self._fetch_messages_single_cursor(chunk_from, chunk_until):
+                    yield msg
+                chunk_start = chunk_end
+        else:
+            async for msg in self._fetch_messages_single_cursor(from_date, until_date):
+                yield msg
+
+    async def _fetch_messages_single_cursor(
+        self,
+        from_date: str,
+        until_date: str,
+    ) -> AsyncGenerator[Dict, None]:
+        """
+        Fetch messages for a single date range using one cursor with pagination.
+
+        This is the inner implementation that handles cursor creation,
+        pagination, expiry recovery, and 500 error recovery.
+        """
+        try:
             log.info("📥 Fetching historical messages using Data Export API...")
             log.info(f"   Date range: {from_date} → {until_date}")
             log.info(f"   Strategy: Single cursor with full pagination")
@@ -375,7 +414,7 @@ class TurnClient:
                     cursor = await self._create_data_export_cursor(
                         "messages", last_message_ts, until_date,
                     )
-                    page_count = 0  # reset page counter for new cursor
+                    page_count = 0
                     continue
                 except httpx.HTTPStatusError as e:
                     if 500 <= e.response.status_code < 600:
