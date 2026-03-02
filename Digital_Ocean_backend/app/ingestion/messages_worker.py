@@ -10,7 +10,7 @@ refactor only. The CLI main() and restart loop have been removed;
 lifecycle is managed by IngestionManager + FastAPI container restart.
 
 Four concurrent tasks:
-    1. incremental_loop    — every 30 s, fetch checkpoint−2s → NOW
+    1. incremental_loop    — every 30 s, fetch checkpoint−5s → NOW
     2. recovery_scheduler  — once/day, fetch NOW−3d → NOW
     3. audit_scheduler     — once/week (Monday), fetch NOW−30d → NOW
     4. metrics_server      — HTTP :9102/metrics (Prometheus-compatible)
@@ -20,13 +20,13 @@ import asyncio
 import datetime
 import json
 import logging
-from typing import Callable, Optional, Tuple, Any
+from typing import Optional, Tuple
+
+import asyncpg
 
 from app.ingestion.base import (
-    DB,
     TurnClient,
     extract_message_timestamp,
-    STARTUP_FROM_DATE,
     NUM_CONSUMERS,
     log,
 )
@@ -40,9 +40,9 @@ class MessageWorker:
     Enterprise-grade continuous message ingestion worker.
 
     Critical invariants (ALL preserved from continuous_ingest.py):
-        • Checkpoint is ALWAYS the MAX(timestamp) of actually-seen messages.
+        • Checkpoint is ALWAYS derived from MAX(timestamp) of durably inserted messages.
         • Checkpoint is NEVER set to NOW() or any wall-clock value.
-        • Every fetch overlaps by 2 seconds to guard against boundary races.
+        • Every fetch overlaps by 5 seconds to guard against boundary races.
         • webhook_events UNIQUE(provider, external_event_id) prevents dupes.
         • If no new messages are returned, checkpoint does NOT move forward.
         • Scheduler state persists across restarts via DB table.
@@ -54,7 +54,7 @@ class MessageWorker:
     # ── constants ──────────────────────────────────────────────────────────
     BATCH_SIZE: int = 1000
     QUEUE_SIZE: int = 10_000
-    OVERLAP_SECONDS: int = 2
+    OVERLAP_SECONDS: int = 5
     INCREMENTAL_INTERVAL: int = 30
     ERROR_BACKOFF: int = 10
     RECOVERY_CHECK_INTERVAL: int = 600
@@ -65,9 +65,10 @@ class MessageWorker:
     LAG_WATCHDOG_THRESHOLD: int = 900      # emergency recovery at 15 min
     QUEUE_BACKPRESSURE_PCT: float = 0.8    # warn at 80% queue capacity
     METRICS_PORT: int = 9102
+    DEFAULT_BOOTSTRAP_DATE = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
 
-    def __init__(self, db: DB, client: TurnClient) -> None:
-        self.db = db
+    def __init__(self, pool: asyncpg.Pool, client: TurnClient) -> None:
+        self.pool = pool
         self.client = client
         self.shutdown_event = asyncio.Event()
 
@@ -98,51 +99,76 @@ class MessageWorker:
     # Checkpoint persistence
     # ══════════════════════════════════════════════════════════════════════
 
-    async def ensure_checkpoint_table(self) -> None:
-        """Create ``ingestion_state`` if it does not exist."""
-        async with self.db.pool.acquire() as conn:
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS ingestion_state (
-                    id   int PRIMARY KEY,
-                    last_external_timestamp timestamptz,
-                    updated_at              timestamptz DEFAULT now()
+    async def ensure_checkpoint_row(self) -> None:
+        """
+        Ensure `ingestion_state.id=1` exists and bootstrap safely.
+
+        Bootstrap order (first run only):
+          1) existing `ingestion_state.id=1`
+          2) MAX(received_at) from webhook_events where event_type='message' minus 1 day
+          3) fixed fallback 2024-01-01T00:00:00Z
+        """
+        async with self.pool.acquire() as conn:
+            existing = await conn.fetchval(
+                "SELECT last_external_timestamp FROM ingestion_state WHERE id = 1"
+            )
+            if existing is not None:
+                log.info(f"✓ Existing message checkpoint found: {existing.isoformat()}")
+                return
+
+            max_received_at = await conn.fetchval(
+                """
+                SELECT MAX(received_at)
+                FROM webhook_events
+                WHERE event_type = 'message'
+                """
+            )
+            if max_received_at is not None:
+                bootstrap_ts = max_received_at - datetime.timedelta(days=1)
+                log.info(
+                    f"✓ Bootstrapping message checkpoint from webhook_events: "
+                    f"{bootstrap_ts.isoformat()} (max(received_at)-1d)"
                 )
-            """)
-            await conn.execute(f"""
-                INSERT INTO ingestion_state (id, last_external_timestamp)
-                VALUES (1, '{STARTUP_FROM_DATE}'::timestamptz)
-                ON CONFLICT (id) DO NOTHING
-            """)
-        log.info("✓ ingestion_state table ready (messages, id=1)")
+            else:
+                bootstrap_ts = self.DEFAULT_BOOTSTRAP_DATE
+                log.info(
+                    f"✓ Bootstrapping message checkpoint from fixed fallback: "
+                    f"{bootstrap_ts.isoformat()}"
+                )
+
+            await conn.execute(
+                """
+                INSERT INTO ingestion_state (id, last_external_timestamp, updated_at)
+                VALUES (1, $1, NOW())
+                ON CONFLICT (id) DO UPDATE
+                SET last_external_timestamp = COALESCE(
+                    ingestion_state.last_external_timestamp,
+                    EXCLUDED.last_external_timestamp
+                ),
+                    updated_at = NOW()
+                """,
+                bootstrap_ts,
+            )
 
     # ══════════════════════════════════════════════════════════════════════
     # Persistent scheduler state
     # ══════════════════════════════════════════════════════════════════════
 
-    async def ensure_scheduler_state_table(self) -> None:
+    async def ensure_scheduler_state_row(self) -> None:
         """
-        Create ``ingestion_scheduler_state`` to persist recovery/audit dates
-        across process restarts, preventing duplicate sweeps.
+        Ensure scheduler state row exists (no schema mutation).
         """
-        async with self.db.pool.acquire() as conn:
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS ingestion_scheduler_state (
-                    id                 int PRIMARY KEY,
-                    last_recovery_date date,
-                    last_audit_date    date,
-                    updated_at         timestamptz DEFAULT now()
-                )
-            """)
+        async with self.pool.acquire() as conn:
             await conn.execute("""
                 INSERT INTO ingestion_scheduler_state (id)
                 VALUES (1)
                 ON CONFLICT (id) DO NOTHING
             """)
-        log.info("✓ ingestion_scheduler_state table ready")
+        log.info("✓ ingestion_scheduler_state row ensured")
 
     async def load_scheduler_state(self) -> None:
         """Load persisted scheduler dates into memory on startup."""
-        async with self.db.pool.acquire() as conn:
+        async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT last_recovery_date, last_audit_date "
                 "FROM ingestion_scheduler_state WHERE id = 1"
@@ -158,7 +184,7 @@ class MessageWorker:
 
     async def persist_scheduler_state(self) -> None:
         """Write current scheduler dates to DB."""
-        async with self.db.pool.acquire() as conn:
+        async with self.pool.acquire() as conn:
             await conn.execute("""
                 UPDATE ingestion_scheduler_state
                 SET last_recovery_date = $1,
@@ -173,13 +199,13 @@ class MessageWorker:
 
     async def get_checkpoint(self) -> datetime.datetime:
         """Return the current checkpoint timestamp."""
-        async with self.db.pool.acquire() as conn:
+        async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT last_external_timestamp FROM ingestion_state WHERE id = 1"
             )
             if row and row["last_external_timestamp"]:
                 return row["last_external_timestamp"]
-            return datetime.datetime.fromisoformat(STARTUP_FROM_DATE.replace("Z", "+00:00"))
+            return self.DEFAULT_BOOTSTRAP_DATE
 
     async def update_checkpoint(self, max_ts: datetime.datetime) -> None:
         """
@@ -220,7 +246,7 @@ class MessageWorker:
             )
             return
 
-        async with self.db.pool.acquire() as conn:
+        async with self.pool.acquire() as conn:
             await conn.execute("""
                 UPDATE ingestion_state
                 SET last_external_timestamp = $1,
@@ -309,10 +335,11 @@ class MessageWorker:
             )
             writer.write(response.encode())
             await writer.drain()
-        except Exception:
-            pass
+        except Exception as exc:
+            log.error(f"Metrics request handling failed: {exc}", exc_info=True)
         finally:
             writer.close()
+            await writer.wait_closed()
 
     async def start_metrics_server(self) -> None:
         """Start Prometheus-compatible metrics HTTP server on port 9102."""
@@ -342,7 +369,6 @@ class MessageWorker:
         from_date: str,
         until_date: str,
         mode: str,
-        on_progress_ts: Optional[Callable[[datetime.datetime], Any]] = None,
     ) -> Tuple[int, int, Optional[datetime.datetime]]:
         """
         Fetch messages from Turn.io and insert into ``webhook_events``.
@@ -352,17 +378,30 @@ class MessageWorker:
         2 consumers → drain queue and batch-INSERT with actual-row counting
 
         Returns:
-            ``(scanned, inserted, max_timestamp_seen)``
+            ``(scanned, inserted, max_durable_timestamp)``
         """
         scanned = 0
         inserted = 0
-        max_ts: Optional[datetime.datetime] = None
+        max_durable_ts: Optional[datetime.datetime] = None
 
         queue: asyncio.Queue = asyncio.Queue(maxsize=self.QUEUE_SIZE)
         producers_done = asyncio.Event()
         backpressure_threshold = int(self.QUEUE_SIZE * self.QUEUE_BACKPRESSURE_PCT)
+        durable_lock = asyncio.Lock()
 
-        # ── consumer (×2) ─────────────────────────────────────────────────
+        async def mark_durable(candidate_ts: Optional[datetime.datetime]) -> None:
+            """
+            Update durable max timestamp only after committed DB flush.
+
+            This is the core checkpoint safety guarantee: timestamps are
+            promoted only once a batch write has completed successfully.
+            """
+            nonlocal max_durable_ts
+            if candidate_ts is None:
+                return
+            async with durable_lock:
+                if max_durable_ts is None or candidate_ts > max_durable_ts:
+                    max_durable_ts = candidate_ts
 
         async def batch_consumer() -> None:
             """Drain queue in batches and INSERT to count real inserts."""
@@ -372,34 +411,38 @@ class MessageWorker:
             last_flush = asyncio.get_event_loop().time()
             flush_interval = 2.0
 
-            async with self.db.pool.acquire() as conn:
+            async with self.pool.acquire() as conn:
                 while True:
                     try:
                         item = await asyncio.wait_for(queue.get(), timeout=0.5)
                         batch.append(item)
 
                         if len(batch) >= self.BATCH_SIZE:
-                            inserted += await self._flush_batch(conn, batch)
+                            batch_inserted, batch_max_ts = await self._flush_batch(conn, batch)
+                            inserted += batch_inserted
+                            await mark_durable(batch_max_ts)
                             batch = []
                             last_flush = asyncio.get_event_loop().time()
 
                     except asyncio.TimeoutError:
                         now = asyncio.get_event_loop().time()
                         if batch and (now - last_flush >= flush_interval or producers_done.is_set()):
-                            inserted += await self._flush_batch(conn, batch)
+                            batch_inserted, batch_max_ts = await self._flush_batch(conn, batch)
+                            inserted += batch_inserted
+                            await mark_durable(batch_max_ts)
                             batch = []
                             last_flush = now
 
                         if producers_done.is_set() and queue.empty():
                             if batch:
-                                inserted += await self._flush_batch(conn, batch)
+                                batch_inserted, batch_max_ts = await self._flush_batch(conn, batch)
+                                inserted += batch_inserted
+                                await mark_durable(batch_max_ts)
                             break
-
-        # ── producer (×1) ────────────────────────────────────────────────
 
         async def message_producer() -> None:
             """Fetch via TurnClient.get_messages and enqueue."""
-            nonlocal scanned, max_ts
+            nonlocal scanned
 
             try:
                 async for msg in self.client.get_messages(from_date, until_date):
@@ -407,10 +450,7 @@ class MessageWorker:
                     if not ext_id:
                         continue
 
-                    # Track MAX timestamp using priority chain
                     msg_ts = extract_message_timestamp(msg)
-                    if msg_ts is not None and (max_ts is None or msg_ts > max_ts):
-                        max_ts = msg_ts
 
                     # Queue backpressure — throttle producer when > 80%
                     if queue.qsize() > backpressure_threshold:
@@ -423,19 +463,17 @@ class MessageWorker:
                     # Enqueue message event
                     if queue.full():
                         log.warning(f"  ⚠️ [{mode}] Ingest queue full, waiting for DB flush...")
-                    await queue.put(("turn_io", "message", ext_id, msg))
+                    await queue.put(("turn_io", "message", ext_id, msg, msg_ts))
                     scanned += 1
 
                     if scanned % 500 == 0:
                         log.info(f"  [{mode}] fetched {scanned:,} messages so far …")
 
-                    # Periodic checkpoint update (avoid timeout loss)
-                    if on_progress_ts and scanned % 1000 == 0 and max_ts:
-                        await on_progress_ts(max_ts)
-
             except Exception as exc:
                 log.error(f"❌ [{mode}] Fetch failed: {exc}", exc_info=True)
                 raise
+            finally:
+                producers_done.set()
 
         # ── orchestrate ──────────────────────────────────────────────────
 
@@ -444,26 +482,19 @@ class MessageWorker:
             for i in range(NUM_CONSUMERS)
         ]
         producer_task = asyncio.create_task(message_producer(), name=f"{mode}-producer")
+        pipeline_tasks = [producer_task, *consumer_tasks]
 
         try:
-            await producer_task
-            producers_done.set()
-            await asyncio.gather(*consumer_tasks)
+            await asyncio.gather(*pipeline_tasks)
         except (Exception, asyncio.CancelledError) as exc:
             log.error(f"❌ [{mode}] Ingestion pipeline error or cancellation: {exc}")
-            # Ensure everything is cleaned up if we exit early (e.g. timeout)
-            producer_task.cancel()
-            for t in consumer_tasks:
+            for t in pipeline_tasks:
                 t.cancel()
-            
-            # Wait for tasks to acknowledge cancellation
-            await asyncio.gather(producer_task, *consumer_tasks, return_exceptions=True)
+            await asyncio.gather(*pipeline_tasks, return_exceptions=True)
             raise
-        finally:
-            # Double safety: set the event so consumers don't hang if they weren't cancelled
-            producers_done.set()
 
-        return scanned, inserted, max_ts
+        # Deterministic checkpoint source for the caller: durable writes only.
+        return scanned, inserted, max_durable_ts
 
     # ── Timeout-protected fetch wrapper ───────────────────────────────────
 
@@ -472,12 +503,11 @@ class MessageWorker:
         from_date: str,
         until_date: str,
         mode: str,
-        on_progress_ts: Optional[Callable[[datetime.datetime], Any]] = None,
     ) -> Tuple[int, int, Optional[datetime.datetime]]:
         """
         Timeout-protected wrapper around ``fetch_and_insert``.
 
-        If the fetch takes longer than FETCH_TIMEOUT (10 min), it is
+        If the fetch takes longer than FETCH_TIMEOUT (2 hours), it is
         cancelled. The checkpoint is NOT moved.
 
         Returns:
@@ -485,7 +515,7 @@ class MessageWorker:
         """
         try:
             return await asyncio.wait_for(
-                self.fetch_and_insert(from_date, until_date, mode, on_progress_ts=on_progress_ts),
+                self.fetch_and_insert(from_date, until_date, mode),
                 timeout=self.FETCH_TIMEOUT,
             )
         except asyncio.TimeoutError:
@@ -497,40 +527,48 @@ class MessageWorker:
 
     # ── batch writer ─────────────────────────────────────────────────────
 
-    async def _flush_batch(self, conn, batch: list) -> int:
+    async def _flush_batch(self, conn, batch: list) -> Tuple[int, Optional[datetime.datetime]]:
         """
         Insert a batch into ``webhook_events`` and return the **actual**
-        number of rows inserted (after ON CONFLICT dedup).
-
-        Uses ``executemany`` for maximum performance.
-        Row count from PostgreSQL command tag.
+        number of rows inserted (after ON CONFLICT dedup) plus the max
+        timestamp from rows actually inserted in this committed batch.
         """
         if not batch:
-            return 0
+            return 0, None
 
         try:
-            records = [
-                (provider, event_type, ext_id, json.dumps(payload))
-                for provider, event_type, ext_id, payload in batch
-            ]
+            placeholders = []
+            values = []
+            idx = 1
+            ts_by_key = {}
+            for provider, event_type, ext_id, payload, msg_ts in batch:
+                placeholders.append(f"(${idx}, ${idx+1}, ${idx+2}, ${idx+3}::jsonb, FALSE)")
+                values.extend([provider, event_type, ext_id, json.dumps(payload)])
+                idx += 4
+                key = (provider, ext_id)
+                existing = ts_by_key.get(key)
+                if msg_ts is not None and (existing is None or msg_ts > existing):
+                    ts_by_key[key] = msg_ts
 
-            results = await conn.executemany(
-                """
+            sql = f"""
                 INSERT INTO webhook_events
                     (provider, event_type, external_event_id, payload, processed)
-                VALUES ($1, $2, $3, $4, FALSE)
+                VALUES {", ".join(placeholders)}
                 ON CONFLICT (provider, external_event_id) DO NOTHING
-                """,
-                records
-            )
+                RETURNING provider, external_event_id
+            """
+            inserted_rows = await conn.fetch(sql, *values)
+            actual_inserted = len(inserted_rows)
+            if actual_inserted == 0:
+                return 0, None
 
-            # executemany returns a list of results in some drivers, 
-            # but in asyncpg it returns a single command tag for the entire set.
-            # We assume successful insertion of unique rows.
-            # To get exact count in asyncpg for executemany, one would need extra logic.
-            # Given we use ON CONFLICT DO NOTHING, we'll return len(batch) as a heuristic
-            # or simply rely on the fact that it was called.
-            return len(batch)
+            inserted_max_ts: Optional[datetime.datetime] = None
+            for row in inserted_rows:
+                key = (row["provider"], row["external_event_id"])
+                ts = ts_by_key.get(key)
+                if ts is not None and (inserted_max_ts is None or ts > inserted_max_ts):
+                    inserted_max_ts = ts
+            return actual_inserted, inserted_max_ts
 
         except Exception as exc:
             log.error(f"Failed to flush batch of {len(batch)} events: {exc}")
@@ -544,10 +582,10 @@ class MessageWorker:
         """
         Every 30 seconds:
             1. Read checkpoint
-            2. from_date = checkpoint − 2 s  (overlap window)
+            2. from_date = checkpoint − 5 s  (overlap window)
             3. until_date = NOW()
-            4. Fetch & insert (with 1-hour timeout)
-            5. If messages found → checkpoint = MAX(timestamp seen)
+            4. Fetch & insert (with timeout protection)
+            5. If inserts committed → checkpoint = MAX(timestamp of inserted rows)
             6. If lag > 300 s → skip sleep (aggressive catch-up)
             7. If lag > 900 s → trigger emergency recovery
             8. Sleep 30 s
@@ -559,31 +597,30 @@ class MessageWorker:
                 checkpoint = await self.get_checkpoint()
                 now_utc = datetime.datetime.now(datetime.timezone.utc)
 
-                # Apply 2-second overlap window
+                # Apply overlap window
                 from_ts = checkpoint - datetime.timedelta(seconds=self.OVERLAP_SECONDS)
                 from_date = from_ts.strftime("%Y-%m-%dT%H:%M:%SZ")
                 until_date = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
 
                 async with self.api_lock:
-                    scanned, inserted, max_ts = await self.safe_fetch_and_insert(
-                        from_date, until_date, "INCREMENTAL",
-                        on_progress_ts=self.update_checkpoint
+                    scanned, inserted, durable_max_ts = await self.safe_fetch_and_insert(
+                        from_date, until_date, "INCREMENTAL"
                     )
 
                 self.stats["total_scanned"] += scanned
                 self.stats["total_inserted"] += inserted
                 self.stats["incremental_runs"] += 1
 
-                # Advance checkpoint ONLY to MAX(actual message timestamp)
-                if max_ts is not None:
-                    await self.update_checkpoint(max_ts)
+                # Advance checkpoint ONLY from durable batch writes.
+                if durable_max_ts is not None:
+                    await self.update_checkpoint(durable_max_ts)
 
                 # Enhanced logging
                 lag = await self.monitor_lag()
                 log.info(
                     f"[INCREMENTAL] range={from_date}→{until_date} "
                     f"scanned={scanned:,} inserted={inserted:,} "
-                    f"max_ts={max_ts.isoformat() if max_ts else 'none'} "
+                    f"max_durable_ts={durable_max_ts.isoformat() if durable_max_ts else 'none'} "
                     f"lag={lag}s"
                 )
 
@@ -732,8 +769,8 @@ class MessageWorker:
         log.info("🚀 MESSAGE WORKER STARTING (Enterprise Edition)")
         log.info("=" * 70)
 
-        await self.ensure_checkpoint_table()
-        await self.ensure_scheduler_state_table()
+        await self.ensure_checkpoint_row()
+        await self.ensure_scheduler_state_row()
         await self.load_scheduler_state()
         await self.monitor_lag()
 
@@ -746,7 +783,7 @@ class MessageWorker:
         ]
 
         log.info("✓ Message worker tasks launched")
-        log.info("  → Incremental : every 30 s (timeout 1 hour)")
+        log.info(f"  → Incremental : every 30 s (timeout {self.FETCH_TIMEOUT} s)")
         log.info("  → Recovery    : once/day  (3-day window)")
         log.info("  → Audit       : Mondays   (30-day window)")
         log.info(f"  → Metrics     : http://0.0.0.0:{self.METRICS_PORT}/metrics")

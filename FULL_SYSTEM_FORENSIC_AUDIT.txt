@@ -1,0 +1,1073 @@
+FULL SYSTEM FORENSIC AUDIT REPORT
+Project: FASTAPI_POSTGREESQL_BACKEND_INGESTION
+Audit Date: 2026-03-02
+Auditor Mode: Static forensic architecture audit (source-only, no logic modification)
+Evidence Base: Repository files, SQL schema, deployment workflow, and import graph
+
+================================================================================
+SECTION 1 — PROJECT STRUCTURE ANALYSIS
+================================================================================
+
+1.1 Full File Inventory (project workspace)
+
+Repository totals discovered:
+- Total files in workspace: 1,644 (includes `.git` internals and `.venv` dependencies)
+- First-party + local non-venv/non-git files: 27
+
+First-party/local non-venv/non-git files:
+1. ./.DS_Store
+2. ./.github/workflows/deploy.yml
+3. ./Digital_Ocean_Schema.sql
+4. ./Digital_Ocean_backend/.DS_Store
+5. ./Digital_Ocean_backend/.env
+6. ./Digital_Ocean_backend/.gitignore
+7. ./Digital_Ocean_backend/Dockerfile
+8. ./Digital_Ocean_backend/__pycache__/db.cpython-311.pyc
+9. ./Digital_Ocean_backend/app/.DS_Store
+10. ./Digital_Ocean_backend/app/__init__.py
+11. ./Digital_Ocean_backend/app/__pycache__/__init__.cpython-311.pyc
+12. ./Digital_Ocean_backend/app/__pycache__/main.cpython-311.pyc
+13. ./Digital_Ocean_backend/app/ingestion/.DS_Store
+14. ./Digital_Ocean_backend/app/ingestion/__init__.py
+15. ./Digital_Ocean_backend/app/ingestion/__pycache__/__init__.cpython-311.pyc
+16. ./Digital_Ocean_backend/app/ingestion/__pycache__/base.cpython-311.pyc
+17. ./Digital_Ocean_backend/app/ingestion/__pycache__/contacts_worker.cpython-311.pyc
+18. ./Digital_Ocean_backend/app/ingestion/__pycache__/manager.cpython-311.pyc
+19. ./Digital_Ocean_backend/app/ingestion/__pycache__/messages_worker.cpython-311.pyc
+20. ./Digital_Ocean_backend/app/ingestion/base.py
+21. ./Digital_Ocean_backend/app/ingestion/contacts_worker.py
+22. ./Digital_Ocean_backend/app/ingestion/manager.py
+23. ./Digital_Ocean_backend/app/ingestion/messages_worker.py
+24. ./Digital_Ocean_backend/app/main.py
+25. ./Digital_Ocean_backend/db.py
+26. ./Digital_Ocean_backend/requirements.txt
+27. ./continuous_ingest.py
+
+1.2 Categorization
+
+API Layer
+- Digital_Ocean_backend/app/main.py
+- Digital_Ocean_backend/db.py
+
+Ingestion Layer
+- Digital_Ocean_backend/app/ingestion/base.py
+- Digital_Ocean_backend/app/ingestion/manager.py
+- Digital_Ocean_backend/app/ingestion/messages_worker.py
+- Digital_Ocean_backend/app/ingestion/contacts_worker.py
+- continuous_ingest.py (legacy standalone ingestion daemon)
+
+DB Layer
+- Digital_Ocean_Schema.sql
+
+Infrastructure / Config
+- Digital_Ocean_backend/.env
+- Digital_Ocean_backend/requirements.txt
+- Digital_Ocean_backend/.gitignore
+- Digital_Ocean_backend/app/__init__.py
+- Digital_Ocean_backend/app/ingestion/__init__.py
+
+Deployment
+- Digital_Ocean_backend/Dockerfile
+- .github/workflows/deploy.yml
+
+Artifacts / Generated / Non-runtime
+- .DS_Store files
+- __pycache__/*.pyc files
+
+1.3 Unused Files / Dead Artifacts
+
+Likely unused at runtime in deployed container path (`docker build` from `Digital_Ocean_backend`):
+- `continuous_ingest.py` (not referenced by FastAPI app startup; only standalone CLI entrypoint, lines `continuous_ingest.py:1257-1327`)
+- `__pycache__` bytecode files
+- `.DS_Store` files
+
+Potentially intentional placeholders:
+- `app/__init__.py` and `app/ingestion/__init__.py` are empty but valid package markers.
+
+1.4 Circular Imports
+
+Import graph (first-party Python modules):
+- `app/main.py` -> `db.py`, `app/ingestion/manager.py`
+- `app/ingestion/manager.py` -> `app/ingestion/base.py`, `messages_worker.py`, `contacts_worker.py`
+- `messages_worker.py` -> `base.py`
+- `contacts_worker.py` -> `base.py`
+- `db.py` -> no local imports
+
+Cycle detection result: No circular imports detected.
+
+1.5 Duplicated Logic
+
+Substantial logic duplication exists between:
+- `continuous_ingest.py` (standalone implementation)
+- `app/ingestion/base.py` + `messages_worker.py` (refactored service implementation)
+
+Duplicated components include:
+- `AsyncRateLimiter`
+- `TurnClient`
+- `DB` class
+- Checkpoint + scheduler state logic
+- Message ingestion pipeline
+
+Evidence:
+- Refactor statements in `base.py:7-20`, `messages_worker.py:7-10`
+- Equivalent class/function names in both files.
+
+1.6 Hidden Coupling
+
+Hidden coupling detected in multiple places:
+- Webhook and ingestion workers write to same `webhook_events` key space with unique `(provider, external_event_id)` (`main.py:143-146`, `messages_worker.py:519-523`, `contacts_worker.py:317-322`, schema unique index `Digital_Ocean_Schema.sql:1716`, `1793`, `1800`).
+- `app/main.py` imports `db_pool` by value (`main.py:8`), while `db.py` rebinds `db_pool` later (`db.py:13-14`), causing stale reference and pool divergence.
+- Shared checkpoint table by convention (`ingestion_state id=1` for messages, `id=2` for contacts) in worker logic (`messages_worker.py:112-116`, `contacts_worker.py:97-101`) rather than schema-enforced partitioning.
+
+
+================================================================================
+SECTION 2 — FILE-BY-FILE EXPLANATION
+================================================================================
+
+File: Digital_Ocean_backend/app/main.py
+1) Purpose
+- FastAPI application entrypoint.
+- Handles lifecycle startup/shutdown and Turn.io webhook endpoint.
+
+2) Key Classes / Functions
+- `_ingestion_task_done` (`main.py:22-33`): logs ingestion manager task exception.
+- `lifespan` (`main.py:37-65`): validates env, connects DB, launches manager, stops manager on shutdown.
+- `health` (`main.py:73-75`): liveness endpoint.
+- `ready` (`main.py:79-95`): readiness endpoint.
+- `_extract_event_id` (`main.py:105-130`): message/status/hash ID extraction.
+- `turn_webhook` (`main.py:134-257`): stores webhook raw event and conditionally inserts into `messages`/`statuses`.
+
+3) External Dependencies
+- Imports `connect_db`, `get_db`, `db_pool` from `db.py` (`main.py:8`)
+- Imports `IngestionManager` (`main.py:9`)
+- Writes tables: `webhook_events`, `messages`, `statuses` (`main.py:143`, `170`, `224`, `242`)
+
+4) Execution Flow
+- Triggered by Uvicorn startup (`Dockerfile:16`).
+- `lifespan` executes at app startup and shutdown.
+- `/webhooks/turn` executes per inbound HTTP request at runtime.
+
+5) Risk Assessment
+- Critical stale `db_pool` import rebinding bug (`main.py:8`, `main.py:57`, `db.py:13-14`).
+- No webhook auth/signature validation (entire handler `main.py:133-257`).
+- Status inserts are not conflict-safe (`main.py:224-255`) and can raise duplicate key on repeated statuses due `ux_statuses_message_status` (`Digital_Ocean_Schema.sql:1786`).
+- `ready` returns `ready: true` even when workers reported stopped (`main.py:91-95`).
+- No explicit closure of webhook DB pool on shutdown (`main.py:62-65`, no close function in `db.py`).
+
+
+File: Digital_Ocean_backend/db.py
+1) Purpose
+- Creates and exposes global asyncpg pool used by webhook request dependency.
+
+2) Key Classes / Functions
+- `connect_db` (`db.py:12-24`): creates pool.
+- `get_db` (`db.py:26-28`): FastAPI dependency yielding a pooled connection.
+
+3) External Dependencies
+- Uses env vars `DB_*` and asyncpg.
+
+4) Execution Flow
+- Called from app lifespan startup (`main.py:53`).
+- `get_db` invoked on each webhook request (`main.py:134`).
+
+5) Risk Assessment
+- No retry/backoff on startup DB connect (`db.py:12-24`).
+- No pool close function -> potential shutdown leak.
+- Coupled to stale-import issue in `main.py`.
+
+
+File: Digital_Ocean_backend/app/ingestion/base.py
+1) Purpose
+- Shared ingestion infrastructure (rate limiter, Turn clients, DB class, timestamp parsers, constants).
+
+2) Key Classes / Functions
+- `_get_startup_date` (`base.py:86-101`)
+- `AsyncRateLimiter` (`base.py:107-149`)
+- `CursorExpiredError` (`base.py:151-153`)
+- `TurnClient` (`base.py:159-520`) for message export API
+- `TurnContactClient` (`base.py:526-1047`) for contacts export API
+- `DB` (`base.py:1053-1097`) internal pool manager
+- `extract_message_timestamp` / `_safe_parse_ts` (`base.py:1104-1173`)
+
+3) External Dependencies
+- Turn.io API endpoints `/v1/data/messages/cursor` and `/v1/data/contacts/cursor`.
+- PostgreSQL via asyncpg.
+
+4) Execution Flow
+- Imported by manager and workers at runtime (`manager.py:19-28`, worker imports).
+- Provides low-level API and DB primitives used during ingestion loops.
+
+5) Risk Assessment
+- `_create_data_export_cursor` can exit loop without explicit raise after repeated 429s (`base.py:221-263`), causing implicit `None` cursor return.
+- Configuration parsing at import time (`DB_PORT` int cast, `NUM_CHUNKS`, etc., `base.py:61`, `71-77`) can hard-fail startup on malformed env.
+- Contacts parallel fetch queue default is large (`PRODUCER_QUEUE_SIZE=50000`, `base.py:75`) and can consume significant memory.
+
+
+File: Digital_Ocean_backend/app/ingestion/manager.py
+1) Purpose
+- Orchestrates message + contact workers, shared rate limiter, startup stagger, and shutdown.
+
+2) Key Classes / Functions
+- `IngestionManager.__init__` (`manager.py:55-69`)
+- `start` (`manager.py:70-110`)
+- `_run_worker` (`manager.py:125-146`)
+- `_heartbeat` (`manager.py:147-152`)
+- `_run_staggered_message_worker` (`manager.py:153-163`)
+- `stop` (`manager.py:164-197`)
+
+3) External Dependencies
+- `DB`, `TurnClient`, `TurnContactClient`, `AsyncRateLimiter` from `base.py`
+- `MessageWorker`, `ContactWorker`
+
+4) Execution Flow
+- Instantiated and started in app lifespan (`main.py:56-58`).
+- Spawns worker tasks then returns.
+
+5) Risk Assessment
+- `start()` returns immediately after task launch; `_ingestion_task` in `main.py` does not represent worker lifecycle (`manager.py:70-110`, `main.py:57`).
+- Heartbeat task is fire-and-forget and never canceled/awaited (`manager.py:97`).
+- `stop()` does not await worker tasks `_msg_task` / `_contact_task` completion (`manager.py:164-197`).
+- Exceptions in worker wrappers are logged and swallowed (no restart policy) (`manager.py:137-145`).
+
+
+File: Digital_Ocean_backend/app/ingestion/messages_worker.py
+1) Purpose
+- Continuous message ingestion worker with incremental + recovery + audit + metrics endpoint.
+
+2) Key Classes / Functions
+- `MessageWorker` class (`messages_worker.py:38-780`)
+- Checkpoint/state methods: `ensure_checkpoint_table`, `get_checkpoint`, `update_checkpoint` (`101-232`)
+- Core pipeline: `fetch_and_insert`, `_flush_batch`, `safe_fetch_and_insert` (`340-538`, `470-497`)
+- Schedulers: `incremental_loop`, `recovery_scheduler`, `audit_scheduler` (`543-724`)
+- Metrics server methods (`263-335`)
+
+3) External Dependencies
+- Uses `TurnClient.get_messages()` from `base.py`.
+- Writes `webhook_events` table (`messages_worker.py:519-523`).
+- Reads/writes `ingestion_state`, `ingestion_scheduler_state`.
+
+4) Execution Flow
+- Started by manager after startup stagger (`manager.py:101-105`, `153-159`).
+- On start: ensures state tables, loads state, starts metrics server, launches 3 internal tasks.
+
+5) Risk Assessment
+- Critical checkpoint safety violation: periodic progress checkpoint updates happen before DB durability (`messages_worker.py:433-434`, `568-571`, `223-231`), allowing data skip on crash.
+- `_flush_batch` returns `len(batch)` heuristic, not actual inserted count under `ON CONFLICT DO NOTHING` (`messages_worker.py:517-533`), causing inflated insertion metrics.
+- Dynamic runtime table creation in service code (`messages_worker.py:104-115`, `128-140`) introduces migration coupling.
+
+
+File: Digital_Ocean_backend/app/ingestion/contacts_worker.py
+1) Purpose
+- Continuous contact ingestion worker with startup backfill and periodic incremental sync.
+
+2) Key Classes / Functions
+- `ContactWorker` class (`contacts_worker.py:55-456`)
+- Checkpoint methods (`85-141`)
+- `run_raw_ingestion` producer/consumer pipeline (`146-297`)
+- `_flush_batch` with UPSERT (`298-336`)
+- `start` lifecycle (`341-456`)
+
+3) External Dependencies
+- Uses `TurnContactClient.get_contacts_parallel()` (`contacts_worker.py:215-217`)
+- Writes `webhook_events` with `ON CONFLICT DO UPDATE` (`317-322`)
+- Uses `ingestion_state id=2`
+
+4) Execution Flow
+- Started by manager immediately (`manager.py:88-94`).
+- Executes full startup backfill on each process start (`contacts_worker.py:371-399`), then periodic loop.
+
+5) Risk Assessment
+- Consumer exceptions are swallowed and not propagated (`contacts_worker.py:202-205`), enabling silent partial worker failure.
+- Deadlock risk: if consumers fail, producer can block forever on full queue (`contacts_worker.py:238-241`), and sentinel puts in finally can also block (`259-260`).
+- No timeout around full `run_raw_ingestion`; long hangs can stall the worker.
+
+
+File: continuous_ingest.py
+1) Purpose
+- Legacy standalone ingestion daemon (not integrated with FastAPI app path).
+
+2) Key Classes / Functions
+- Contains standalone `AsyncRateLimiter`, `TurnClient`, `DB`, `ContinuousIngestor`, `main`.
+
+3) External Dependencies
+- Turn.io API and PostgreSQL directly.
+
+4) Execution Flow
+- Runs only if executed explicitly (`continuous_ingest.py:1326-1327`).
+- Not started from FastAPI deployment path.
+
+5) Risk Assessment
+- Contains its own implementation divergence from active codebase.
+- `AsyncRateLimiter.acquire` in this file has lock/sleep structure defect (`continuous_ingest.py:99-121`) causing potential busy-loop behavior; currently mitigated only by file not being active in deployed path.
+
+
+File: Digital_Ocean_Schema.sql
+1) Purpose
+- Full PostgreSQL schema definitions, constraints, indexes, and FKs.
+
+2) Key Objects used by backend runtime
+- `messages` table (`Digital_Ocean_Schema.sql:658-688`)
+- `statuses` table (`805-817`)
+- `webhook_events` table (`843-851`)
+- `ingestion_state` (`480-484`, PK `1118-1119`)
+- `ingestion_scheduler_state` (`468-473`, PK `1110-1111`)
+- Unique indexes: webhook, message external id, statuses dedupe (`1716`, `1765`, `1786`)
+
+3) External Dependencies
+- None (DDL artifact), but application behavior is tightly coupled to these constraints.
+
+4) Execution Flow
+- Not executed by app code at runtime except worker-created safety tables (`CREATE TABLE IF NOT EXISTS`).
+
+5) Risk Assessment
+- Duplicate unique indexes on same key `(provider, external_event_id)` (`1716`, `1793`, `1800`).
+- Duplicate FK definitions on `messages.chat_id` (`1935-1936`, `1943-1944`).
+
+
+File: Digital_Ocean_backend/Dockerfile
+1) Purpose
+- Container build and runtime command.
+2) Key Elements
+- Installs `requirements.txt`, copies app, exposes ports 8000/9102, runs Uvicorn.
+3) Dependencies
+- Python 3.11 slim and pip dependencies.
+4) Execution Flow
+- Used by GitHub Actions deploy workflow.
+5) Risks
+- No explicit non-root USER.
+- No healthcheck instruction.
+- No `--workers` specified (single-process implied).
+
+
+File: .github/workflows/deploy.yml
+1) Purpose
+- CI/CD pipeline: build image and deploy to droplet.
+2) Key Steps
+- Buildx build + push (`deploy.yml:25-31`)
+- SSH deploy stop/rm/pull/run (`33-49`)
+3) Execution Flow
+- Triggered on push to `main`.
+4) Risks
+- No smoke test/health verification post-deploy.
+- Single container deployment model with no rolling strategy.
+
+
+File: Digital_Ocean_backend/.env
+1) Purpose
+- Local environment configuration.
+2) Key Variables
+- Turn.io URL/token, DB credentials, `BUSINESS_NUMBER_ID`, startup date.
+3) Execution Flow
+- Loaded by `load_dotenv()` in `db.py` and `base.py`.
+4) Risks
+- Contains plaintext secrets in workspace (`.env:2, 4-8`).
+
+
+File: Digital_Ocean_backend/requirements.txt
+1) Purpose
+- Python dependency list.
+2) Risks
+- Unpinned versions increase reproducibility drift.
+
+
+File: Digital_Ocean_backend/.gitignore
+1) Purpose
+- Ignores `.env`, `__pycache__`, `*.pyc`, log file.
+2) Risks
+- Root-level `.DS_Store` and some `.DS_Store` under app paths are still present in tracked set.
+
+
+================================================================================
+SECTION 3 — END-TO-END DATA FLOW
+================================================================================
+
+A) Webhook Processing Flow (Turn.io -> API -> DB)
+
+1. Request arrival
+- HTTP POST `/webhooks/turn` (`main.py:133-134`)
+- JSON body parsed via `await request.json()` (`main.py:135`)
+
+2. Payload parsing and ID extraction
+- Event type read from `payload["type"]` (`main.py:136`).
+- Stable external ID derived via `_extract_event_id` (`main.py:105-130`):
+  a) `message.id`
+  b) `status.id`
+  c) fallback deterministic hash
+
+3. Idempotent raw webhook write
+- Inserts into `webhook_events` with `ON CONFLICT (provider, external_event_id) DO NOTHING` (`main.py:141-146`).
+
+4. Message event branch (`event_type == "message"`)
+- Checks existing `messages.external_id` (`main.py:158-161`).
+- Inserts message row if absent (`main.py:168-184`).
+
+5. Status event branch (`event_type == "status"`)
+- Resolves message row by `messages.external_id=status.id` (`main.py:195-202`).
+- Inserts status row with payload timestamp parse fallback (`main.py:206-255`).
+
+6. Error handling behavior
+- Message insert exceptions are caught/logged (`main.py:185-190`) and request still returns success.
+- Status insert exceptions are not locally caught; DB errors bubble and produce request failure.
+
+7. Critical idempotency conflict
+- Status and message events may share same external ID (`_extract_event_id` status path `main.py:121-126` vs message path `115-119`).
+- Since unique key excludes `event_type`, one of the two event types can be dropped in `webhook_events` (`main.py:145`, schema `Digital_Ocean_Schema.sql:1716`).
+
+
+B) Messages Ingestion Flow
+
+Startup sequence
+1. FastAPI lifespan starts (`main.py:37-60`).
+2. DB pool created via `connect_db` (`main.py:53`, `db.py:12-24`).
+3. Manager created and `start` task launched (`main.py:56-58`).
+4. Manager creates shared limiter + Turn clients + workers (`manager.py:55-86`).
+5. Contact worker starts immediately (`manager.py:88-94`).
+6. Message worker starts after stagger delay (`manager.py:101-105`, `153-159`).
+
+Checkpoint retrieval
+- Message checkpoint read from `ingestion_state.id=1` (`messages_worker.py:174-183`).
+- Bootstrap row created with `STARTUP_FROM_DATE` if missing (`messages_worker.py:112-114`).
+
+Overlap logic
+- Each incremental cycle sets `from_ts = checkpoint - 2s` (`messages_worker.py:563-565`).
+- This intentionally re-fetches overlap window.
+
+Cursor creation
+- `TurnClient._create_data_export_cursor()` called with date window (`base.py:191-232`).
+
+Page iteration
+- `_fetch_messages_single_cursor` loops pages using paging next cursor (`base.py:419-499`).
+
+Retry behavior
+- Cursor creation retries: max 10 for 429/network (`base.py:218-255`).
+- Page fetch retries: max 5 for network, 429, and 5xx (`base.py:272-310`).
+- Cursor expiry recovery: re-create from last offset, max 10 (`base.py:425-440`).
+
+Consumer batching
+- Producer pushes tuples into bounded queue (`messages_worker.py:361-427`).
+- `NUM_CONSUMERS` batch consumers flush DB (`messages_worker.py:442-445`).
+
+DB writes
+- `INSERT INTO webhook_events ... ON CONFLICT DO NOTHING` (`messages_worker.py:519-523`).
+
+ON CONFLICT logic
+- Message worker dedupes by unique `(provider, external_event_id)`.
+
+Checkpoint update
+- Progress updates during fetch every 1000 scanned (`messages_worker.py:433-434`).
+- Final update after cycle if `max_ts` found (`messages_worker.py:577-580`).
+- Update guarded to move forward only (`messages_worker.py:223-231`).
+
+Crash behavior
+- If crash after progress checkpoint update but before batch flushes complete, checkpoint may advance past undurable records (data skip risk).
+
+Restart behavior
+- On restart, ingestion resumes from persisted checkpoint minus overlap; overlap is only 2s, so large undurable window can be skipped.
+
+
+C) Contacts Ingestion Flow (differences vs messages)
+
+Core differences
+- Contacts worker performs full startup backfill each process start (`contacts_worker.py:371-399`).
+- Data is written as event type `contact` into `webhook_events` via UPSERT (`contacts_worker.py:317-322`).
+
+Mutable record logic
+- `ON CONFLICT DO UPDATE` overwrites payload and resets `processed=FALSE` (`contacts_worker.py:319-321`).
+- This is explicitly designed to refresh mutable contact profiles.
+
+Payload refresh rules
+- Existing contact event payload for same `(provider, external_event_id)` is replaced.
+
+`updated_at` vs `inserted_at`
+- Checkpoint candidate timestamp priority: `updated_at` then `inserted_at` (`contacts_worker.py:224-225`).
+- Same priority used in contact API page recovery state (`base.py:823-825`, `942-944`).
+
+Checkpoint semantics
+- Uses `ingestion_state.id=2` (`contacts_worker.py:107`).
+- Advances only when higher timestamp exists (`contacts_worker.py:134-140`).
+
+
+================================================================================
+SECTION 4 — CHECKPOINT & STATE MODEL
+================================================================================
+
+4.1 ingestion_state usage
+- `id=1`: messages checkpoint (`messages_worker.py:178`, `225-231`)
+- `id=2`: contacts checkpoint (`contacts_worker.py:107`, `134-140`)
+- Table schema: `Digital_Ocean_Schema.sql:480-484`
+
+4.2 Forward-only guarantee
+- Enforced by SQL predicate `last_external_timestamp < $1` in both workers (`messages_worker.py:229-231`, `contacts_worker.py:138-140`).
+
+4.3 Regression prevention
+- Message worker rejects naive/future/outlier timestamps (`messages_worker.py:197-213`).
+- Future clamping for extracted message timestamps (`base.py:1130-1133`).
+
+4.4 Overlap buffer mechanics
+- Messages overlap: 2 seconds (`messages_worker.py:57`, `563-565`).
+- Contacts overlap: 2 seconds (`contacts_worker.py:52`, `419-421`).
+- Purpose: reduce boundary misses at exact timestamp edges.
+
+4.5 Mid-cycle process death behavior
+- Messages: checkpoint can move during producer progress (`messages_worker.py:433-434`) before all queued writes are committed; crash here can skip data.
+- Contacts: checkpoint updates only after full cycle return (`contacts_worker.py:428-433`), safer against mid-cycle skip.
+
+4.6 DB write failure behavior
+- Messages: batch failure raises and fails cycle (`messages_worker.py:535-537`, `452-461`), but prior progress checkpoint updates may already be persisted.
+- Contacts: consumer failures logged/swallowed (`contacts_worker.py:202-205`), potentially causing hang without explicit cycle failure.
+
+4.7 API partial failure behavior
+- Messages API has bounded retries and cursor regeneration (`base.py:424-460`).
+- Contacts API chunk failures move to sequential fallback (`base.py:841-845`, `890-962`).
+
+4.8 Bootstrap behavior
+- Initial checkpoint bootstrap from `STARTUP_FROM_DATE` via insert-if-missing (`messages_worker.py:112-114`, `contacts_worker.py:97-99`).
+
+4.9 Validation against requested properties
+
+- Infinite re-fetch loop:
+  - Cursor-expiry loops are bounded (`base.py:416-417`, `427-431`, `800-801`, `927-930`).
+  - Service loops are intentionally perpetual schedulers.
+  - Verdict: No unbounded cursor-expiry loop; expected perpetual polling loops exist by design.
+
+- Timestamp drift:
+  - Future timestamps are rejected/clamped (`messages_worker.py:202-204`, `base.py:1130-1133`, `contacts_worker.py:128-130`).
+  - Verdict: Mostly controlled.
+
+- Skipped window risk:
+  - Present in messages due progress checkpoint before durability (`messages_worker.py:433-434`).
+  - Verdict: Not guaranteed safe.
+
+- Checkpoint race condition:
+  - Single-instance forward-only SQL guard is robust.
+  - Multi-instance deployments still contend with concurrent writers and duplicated ingestion load.
+
+
+================================================================================
+SECTION 5 — RATE LIMITER & CONCURRENCY
+================================================================================
+
+5.1 AsyncRateLimiter math correctness
+
+Implementation (`base.py:107-149`): token bucket.
+- Refill: `tokens = min(burst, tokens + elapsed * rate/period)` (`base.py:133-136`)
+- Acquire condition: `tokens >= requested` (`base.py:140-142`)
+- Wait time when empty: `wait = (needed * period)/rate` (`base.py:144-145`)
+
+Configured by manager:
+- `rate=20`, `period=1.0`, `burst=50` (`manager.py:57`)
+
+Derived limits:
+- Sustained throughput = 20 requests/second.
+- Short burst = 50 immediate requests.
+- Envelope over T seconds: `max_requests(T) = burst + rate*T` (initial window).
+- For 30s: `50 + 20*30 = 650` requests theoretical, which is higher than documented Turn limit 600/30s.
+
+5.2 Burst behavior and sliding-window risk
+- There is a potential 30-second overshoot by up to 50 requests at cold start/high contention due burst configuration.
+- This likely manifests as additional 429 responses, not hard deadlock.
+
+5.3 Lock correctness
+- Active implementation in `base.py` sleeps outside lock (`base.py:127-148`) and avoids lock hold during await.
+- Shared limiter is single process-local object (`manager.py:57`, passed to both clients `59-63`).
+
+5.4 Shared limiter across workers
+- Message and contact clients share one limiter in one process (`manager.py:57-63`).
+- No distributed limiter across processes/replicas.
+
+5.5 Potential starvation
+- No strict fairness queue in limiter; starvation is possible under heavy contention but bounded by cooperative scheduling.
+
+5.6 Event-loop blocking risks
+- No blocking `time.sleep` found in active async paths.
+- CPU-heavy `json.dumps` in hot loops can still add event-loop pressure (`messages_worker.py:513-514`, `contacts_worker.py:310-311`).
+
+5.7 Task cancellation handling
+- Message pipeline handles cancellation and gathers canceled tasks (`messages_worker.py:452-461`).
+- Contact pipeline does similar at orchestration level (`contacts_worker.py:276-285`).
+- Manager stop does not await worker task termination (`manager.py:164-197`).
+
+5.8 Validation against requested checks
+- No unbounded concurrency: Mostly true (bounded semaphores/queues), but chunk/task counts are large and configurable.
+- No blocking calls inside async: true for major I/O paths.
+- No deadlock risk: false (contact consumer-failure queue deadlock path exists).
+- No memory explosion: bounded but high; large queue settings can still exceed practical memory limits.
+
+
+================================================================================
+SECTION 6 — ERROR HANDLING & FAILURE MODEL
+================================================================================
+
+API 500
+- Messages export:
+  - Page fetch retries up to 5 with backoff (`base.py:300-308`), then may re-create cursor up to 10 times in wrapper (`base.py:441-460`).
+- Contacts export:
+  - `_fetch_contacts_page` does not explicitly retry 500 in HTTPStatusError branch (`base.py:701-720`); chunk fails and may move to sequential retry (`base.py:841-845`, `890-962`).
+
+API 429
+- Messages cursor creation and page fetch retry with exponential backoff (`base.py:233-241`, `300-308`).
+- Contacts cursor/page honor `Retry-After` and retry (`base.py:622-630`, `688-713`).
+
+After max retries
+- Messages cursor creation may implicitly return `None` after repeated 429 because no terminal raise (`base.py:221-263`).
+- Contacts path raises runtime errors after exhausted retries (`base.py:665`, `735`).
+
+DB Insert Failure
+- Message worker: `_flush_batch` raises -> cycle fails (`messages_worker.py:535-537`, `452-461`).
+- Contact worker: consumer catches and logs but does not re-raise (`contacts_worker.py:202-205`), risking silent degraded state and queue backpressure stall.
+
+Network Timeout
+- Message client retries known timeout/connect exceptions (`base.py:246-258`, `281-293`).
+- Contacts also retries several timeout/connect exceptions (`base.py:721-733`).
+
+Cursor Expiry
+- Message path: `CursorExpiredError` handled with bounded re-create loop (`base.py:425-440`).
+- Contacts path: chunk-level and retry-level bounded cursor re-creation (`base.py:798-808`, `926-933`).
+
+Task Crash
+- Worker wrapper logs crashes and returns (`manager.py:137-145`).
+- No automatic restart policy in-process.
+
+Import-time errors
+- Potential fatal import-time env parse errors in `base.py` constants (`base.py:61`, `71-77`).
+
+Shutdown signal
+- FastAPI lifespan calls `manager.stop()` (`main.py:62-65`).
+- Manager sets shutdown events and closes clients (`manager.py:169-185`), but does not await worker task completion.
+
+
+================================================================================
+SECTION 7 — DATABASE INTERACTION AUDIT
+================================================================================
+
+7.1 SQL write statements (active service path)
+
+Webhook API (`main.py`)
+- `INSERT webhook_events ... ON CONFLICT DO NOTHING` (`main.py:143-146`)
+- `SELECT id FROM messages WHERE external_id=$1` (`main.py:158-161`)
+- `INSERT messages (...)` (`main.py:170-178`)
+- `SELECT id, number_id FROM messages WHERE external_id=$1` (`main.py:195-201`)
+- `INSERT statuses (...)` (`main.py:224-231`, `242-249`)
+
+Message worker
+- `CREATE TABLE IF NOT EXISTS ingestion_state` (`messages_worker.py:104-110`)
+- `INSERT ingestion_state id=1 ... ON CONFLICT DO NOTHING` (`111-115`)
+- `CREATE TABLE IF NOT EXISTS ingestion_scheduler_state` (`128-135`)
+- `INSERT ingestion_scheduler_state id=1` (`136-140`)
+- `UPDATE ingestion_scheduler_state` (`162-168`)
+- `UPDATE ingestion_state ... WHERE last_external_timestamp < $1` (`225-231`)
+- `INSERT webhook_events ... ON CONFLICT DO NOTHING` (`519-523`)
+
+Contact worker
+- `CREATE TABLE IF NOT EXISTS ingestion_state` (`89-95`)
+- `INSERT ingestion_state id=2 ... ON CONFLICT DO NOTHING` (`96-100`)
+- `UPDATE ingestion_state ... WHERE last_external_timestamp < $1` (`134-140`)
+- `INSERT webhook_events ... ON CONFLICT ... DO UPDATE` (`317-322`)
+
+7.2 ON CONFLICT clauses
+- Webhook API: DO NOTHING for raw events.
+- Message ingestion: DO NOTHING for event dedupe.
+- Contact ingestion: DO UPDATE payload + `processed=FALSE`.
+
+7.3 FK safety
+- `statuses.message_id` has FK to `messages.id` (`Digital_Ocean_Schema.sql:1951-1952`).
+- No FK found from `messages.number_id` to `numbers.id` nor `statuses.number_id` to `numbers.id` in schema scan.
+
+7.4 Nullability assumptions and coupling
+- `messages.direction` NOT NULL (`Digital_Ocean_Schema.sql:687`) must always be set; webhook handler sets default inbound (`main.py:164`).
+- `statuses.status` NOT NULL enum (`Digital_Ocean_Schema.sql:810`) accepts only enum values; webhook inserts raw string (`main.py:235`, `253`) without normalization.
+
+7.5 Migration handling
+- No migration framework detected (no Alembic/etc.).
+- Workers create state tables at runtime (`messages_worker.py:104-110`, `128-135`, `contacts_worker.py:89-95`).
+
+7.6 Runtime CREATE TABLE usage
+- Present for ingestion state/scheduler state as above.
+
+7.7 Pool sharing correctness
+- Intended: manager receives external pool (`manager.py:70-80`).
+- Actual: stale imported `db_pool` in `main.py` leads `None` passed to manager (`main.py:8`, `57`), so manager creates separate pool (`manager.py:81`).
+
+7.8 Connection leak risk
+- Webhook pool from `db.py` lacks explicit close path.
+- Manager may close only its own internal pool (`manager.py:190-193`).
+
+
+================================================================================
+SECTION 8 — DEPLOYMENT MODEL ANALYSIS
+================================================================================
+
+8.1 Dockerfile correctness
+- Base image and install sequence are valid (`Dockerfile:1-10`).
+- Uvicorn command is valid (`Dockerfile:16`).
+- Ports 8000 and 9102 exposed (`Dockerfile:13`).
+
+8.2 Uvicorn worker count
+- No `--workers` flag; default single process.
+- This matches singleton assumptions in current design.
+
+8.3 Singleton assumption
+- Ingestion manager and workers are process-local.
+- Distributed scaling is not coordinated (checkpoint/rate limiter not distributed).
+
+8.4 Horizontal scaling risks
+- Multiple replicas each run ingestion loops (duplicate API pull load, duplicate DB write attempts).
+- Rate limiter is per-process, so aggregate can exceed Turn global limits (`manager.py:57`).
+- Checkpoint writers contend on same rows (`ingestion_state id=1/2`).
+
+8.5 DB pool sizing vs host limits
+- Webhook pool max 15 (`db.py:21`).
+- Manager internal pool max 15 (`base.py:1080`) when stale import bug triggers.
+- Effective 30 possible pooled connections per container process.
+
+8.6 Memory usage estimation (queue-driven)
+- Message queue max 10,000 (`messages_worker.py:56`, `361`).
+- Contacts queues max 50,000 + 30,000 (`base.py:75-76`, `contacts_worker.py:166`).
+- Under large payloads this can become several hundred MB.
+
+8.7 Health endpoint correctness
+- `/health`: process liveness only (`main.py:72-75`) — correct for liveness.
+- `/ready`: checks stale imported `db_pool` and always returns `ready: true` payload (`main.py:82-95`) — not reliable readiness.
+
+8.8 Production misconfiguration risks
+- Unpinned dependencies (`requirements.txt`).
+- No post-deploy health gate in CI workflow (`deploy.yml:33-49`).
+- Container runs as root (no USER directive).
+
+
+================================================================================
+SECTION 9 — PERFORMANCE ANALYSIS
+================================================================================
+
+9.1 Max queue memory usage (estimated)
+
+Configured capacities:
+- Messages ingestion queue: 10,000 items.
+- Contacts fetch queue: 50,000 items.
+- Contacts ingest queue: 30,000 items.
+
+If average serialized payload size is:
+- 1 KB/event: raw payload bytes ~90 MB total across queues.
+- 2 KB/event: raw payload bytes ~180 MB.
+
+Python object overhead (dict/tuple/string wrappers) typically multiplies raw payload memory by ~2x to ~3x.
+Expected peak process memory contribution from queues can therefore exceed ~200 MB and plausibly reach ~500+ MB in heavy backlog situations.
+
+9.2 API throughput ceiling
+
+Limiter parameters (`rate=20/s`, `burst=50`):
+- Sustained request ceiling: 20 req/s combined across message + contact workers.
+- Startup burst: up to 50 immediate requests.
+
+Messages API request payload includes `limit=100` (`base.py:214`), so upper-bound message fetch throughput (API-side) is approximately:
+- `20 req/s * 100 msg/req = 2,000 msg/s` before DB/storage bottlenecks.
+
+Contacts page size is API-defined (not explicitly set), so throughput is variable.
+
+9.3 DB write throughput
+
+- Message worker uses `executemany` with batch size 1000 (`messages_worker.py:55`, `517-525`).
+- Contact worker also uses batch size 1000 (`base.py:72`, `185`, `315-324`).
+
+Effective throughput depends on DB latency, conflict rate, and payload size. In conflict-heavy windows, logical insert gain can be low while write load remains high.
+
+9.4 Worst-case ingestion lag
+
+- Normal target loop period: 30s messages (`messages_worker.py:58`, `606`).
+- Under repeated failures, lag can grow unbounded over time.
+- Watchdog recovery triggers when lag > 900s (`messages_worker.py:65`, `591-597`).
+
+9.5 Recovery time from large backlog
+
+Let:
+- `B = backlog messages`
+- `R = effective durable writes/sec`
+
+Recovery time ≈ `B / R` seconds.
+Examples:
+- B=10,000,000 and R=1,000/s -> ~2.78 hours
+- B=10,000,000 and R=300/s -> ~9.26 hours
+
+9.6 Backfill scaling behavior
+
+Messages
+- Large ranges split into 7-day sequential chunks (`base.py:343-367`).
+
+Contacts
+- Range split into N chunks (default 24) with parallel fetch tasks (`base.py:741`, `765-773`, `861-865`).
+- Failed chunks retried sequentially with global timeout (`base.py:890-905`).
+
+
+================================================================================
+SECTION 10 — HIDDEN BUG DETECTION
+================================================================================
+
+Checklist results:
+
+1. Logger usage before definition
+- Not detected in active path.
+
+2. Mutable default arguments
+- Not detected.
+
+3. Shared mutable state
+- Present: `stats` dict updated from concurrent tasks (`messages_worker.py:79-85`, increments in loops).
+
+4. Async tasks not awaited
+- Manager heartbeat task not stored/awaited (`manager.py:97`).
+- Worker tasks not explicitly awaited in stop path (`manager.py:164-197`).
+
+5. Cancellation swallowing
+- Multiple broad `except Exception: pass` blocks in manager/client cleanup (`manager.py:180-185`, `193-194`; metrics handler swallow in `messages_worker.py:312-313`).
+
+6. Silent exception swallowing
+- Contact consumer swallows exceptions (`contacts_worker.py:202-205`) and continues overall pipeline.
+
+7. Hardcoded values
+- Many operational constants are hardcoded defaults (intervals, thresholds, startup date fallback).
+
+8. Infinite loops without sleep
+- No active tight infinite loop detected in deployed path.
+- Legacy `continuous_ingest.py` contains defective rate limiter loop structure (`continuous_ingest.py:99-121`), but file is not active in deployment path.
+
+9. Blocking I/O inside async
+- No `time.sleep` in active async code.
+- Potential sync CPU pressure from large JSON serialization in event loop.
+
+10. Duplicate DB pools
+- Detected due stale imported `db_pool` reference (`main.py:8`, `57`; `db.py:13-14`; `manager.py:81`).
+
+11. Environment variable crash risks
+- Import-time int parsing in `base.py` can raise on malformed env (`base.py:61`, `71-77`).
+- `BUSINESS_NUMBER_ID` cast may raise startup exception (`main.py:43-50`).
+
+
+================================================================================
+SECTION 11 — ISSUE MATRIX
+================================================================================
+
+🔴 Critical
+
+C1
+- File: `Digital_Ocean_backend/app/main.py:8`, `:57`; `Digital_Ocean_backend/db.py:13-14`; `Digital_Ocean_backend/app/ingestion/manager.py:81`
+- Description: `db_pool` imported by value remains stale (`None`) after `connect_db()` rebinding.
+- Risk explanation: Manager receives `None` and creates second pool; readiness path uses stale `None` pool.
+- Runtime impact: Duplicate pool creation, broken pool-sharing assumptions.
+- Production impact: Connection pressure, readiness misbehavior, shutdown leak complexity.
+
+C2
+- File: `Digital_Ocean_backend/app/ingestion/messages_worker.py:433-434`, `:568-571`, `:223-231`
+- Description: Checkpoint is advanced during producer progress before queued records are guaranteed durable in DB.
+- Risk explanation: Crash after checkpoint update but before flush completion can skip data beyond overlap window.
+- Runtime impact: Silent message loss windows under crash/kill conditions.
+- Production impact: Non-recoverable ingestion gaps; audit integrity compromised.
+
+C3
+- File: `Digital_Ocean_backend/app/main.py:121-126`, `:143-146`; `Digital_Ocean_Schema.sql:1716`
+- Description: Unique key `(provider, external_event_id)` causes status/message event ID collisions in `webhook_events`.
+- Risk explanation: Status events may be dropped when same message ID already stored as message event.
+- Runtime impact: Partial raw event history.
+- Production impact: Forensic traceability and downstream processing correctness degraded.
+
+C4
+- File: `Digital_Ocean_backend/app/main.py:133-257`
+- Description: Webhook endpoint lacks request authentication/signature verification.
+- Risk explanation: Any external actor can POST forged payloads and write to DB.
+- Runtime impact: Data poisoning and untrusted event writes.
+- Production impact: Security incident risk and data integrity loss.
+
+C5
+- File: `Digital_Ocean_backend/app/ingestion/contacts_worker.py:202-205`, `:238-241`, `:259-260`, `:273`
+- Description: Contact consumer errors are swallowed; producer can block forever on full queue.
+- Risk explanation: Failed consumers reduce drain capacity; producer and sentinel writes can deadlock.
+- Runtime impact: Stalled contact ingestion cycle.
+- Production impact: Contact sync outage without hard failure signal.
+
+
+🟠 High
+
+H1
+- File: `Digital_Ocean_backend/app/main.py:224-255`; `Digital_Ocean_Schema.sql:1786`
+- Description: Status insert has no conflict handling while schema enforces unique `(message_id, status)`.
+- Risk explanation: Duplicate delivery/read callbacks trigger DB unique violations.
+- Runtime impact: 500 responses on repeated status events.
+- Production impact: Noisy error rates; potential retries/amplification upstream.
+
+H2
+- File: `Digital_Ocean_backend/app/ingestion/manager.py:164-197`, `:97`
+- Description: Manager stop path does not await worker task completion; heartbeat task unmanaged.
+- Risk explanation: Shutdown may terminate with live background tasks and partial cleanup.
+- Runtime impact: Non-deterministic shutdown behavior.
+- Production impact: Deployment restart instability and orphan task behavior.
+
+H3
+- File: `Digital_Ocean_backend/app/ingestion/base.py:221-263`
+- Description: `_create_data_export_cursor` has no terminal raise after retry loop; can return `None`.
+- Risk explanation: Repeated 429 sequence can degrade to silent no-cursor flow.
+- Runtime impact: Empty fetch cycles without explicit fatal signal.
+- Production impact: Hidden ingestion stalls.
+
+H4
+- File: `Digital_Ocean_backend/app/main.py:62-65`; `Digital_Ocean_backend/db.py`
+- Description: Webhook DB pool has no explicit close path in app shutdown.
+- Risk explanation: Resource cleanup depends on process exit behavior.
+- Runtime impact: Potential connection leaks during graceful restarts.
+- Production impact: DB connection exhaustion risk over repeated restarts.
+
+H5
+- File: `Digital_Ocean_backend/app/main.py:88-95`
+- Description: Readiness response always returns `ready: true` even when worker status is `stopped`.
+- Risk explanation: Health orchestration can treat degraded instance as ready.
+- Runtime impact: Traffic routed to unhealthy ingestion state.
+- Production impact: False green deployments and harder incident detection.
+
+H6
+- File: `Digital_Ocean_backend/app/main.py:143-145`; `messages_worker.py:519-523`; `contacts_worker.py:317-322`
+- Description: `processed` flag is repeatedly set/reset to FALSE; no processor-to-TRUE path found in codebase.
+- Risk explanation: Unprocessed queue semantics are incomplete.
+- Runtime impact: `webhook_events` may grow indefinitely as “unprocessed”.
+- Production impact: Storage bloat and observability confusion.
+
+H7
+- File: `Digital_Ocean_backend/.env:2,4-8`
+- Description: Plaintext Turn token and DB credentials present in local workspace env file.
+- Risk explanation: Secret exposure risk if file handling is mishandled.
+- Runtime impact: Credential compromise blast radius includes DB and API token.
+- Production impact: Security/compliance risk.
+
+H8
+- File: `Digital_Ocean_backend/db.py:12-24`
+- Description: No retry logic for startup DB pool creation in webhook path.
+- Risk explanation: Transient DB outage causes app startup failure.
+- Runtime impact: Service unavailable at boot under transient DB faults.
+- Production impact: Lower availability during deploy/restart windows.
+
+
+🟡 Medium
+
+M1
+- File: `Digital_Ocean_backend/app/ingestion/manager.py:57`; `base.py:116-121`
+- Description: Limiter burst (50) + sustained (20/s) allows up to 650 requests in first 30s.
+- Risk explanation: Above documented 600/30s provider budget.
+- Runtime impact: Increased 429s during burst periods.
+- Production impact: Reduced effective throughput and noisy retries.
+
+M2
+- File: `Digital_Ocean_backend/app/ingestion/contacts_worker.py:371-399`
+- Description: Full startup contact backfill executes every restart.
+- Risk explanation: Restart storms trigger heavy repeated API/DB load.
+- Runtime impact: Long warm-up windows, high reprocessing.
+- Production impact: Increased operational cost and latency spikes.
+
+M3
+- File: `Digital_Ocean_Schema.sql:1716`, `1793`, `1800`; `1935-1936`, `1943-1944`
+- Description: Duplicate unique indexes and duplicate FKs exist in schema.
+- Risk explanation: Redundant constraint/index maintenance overhead.
+- Runtime impact: Additional write amplification.
+- Production impact: Slower writes and heavier maintenance tasks.
+
+M4
+- File: `Digital_Ocean_backend/app/main.py:158-161`, `170-184`; `Digital_Ocean_Schema.sql:1765`
+- Description: Message dedupe uses SELECT-then-INSERT race pattern rather than UPSERT.
+- Risk explanation: Concurrent webhook duplicates can still hit unique violation path.
+- Runtime impact: avoidable exception/log noise.
+- Production impact: lower robustness under burst duplicate traffic.
+
+M5
+- File: `messages_worker.py:104-115`, `128-140`; `contacts_worker.py:89-100`
+- Description: Runtime table creation in app logic instead of migration pipeline.
+- Risk explanation: Schema drift ownership split between DDL and runtime behavior.
+- Runtime impact: startup side effects and implicit schema mutation.
+- Production impact: harder change control/auditability.
+
+
+🟢 Minor
+
+N1
+- File: `.DS_Store` files and `__pycache__` artifacts
+- Description: Non-runtime artifacts present in project tree/tracked set.
+- Risk explanation: repository hygiene issue.
+- Runtime impact: none.
+- Production impact: maintainability noise.
+
+N2
+- File: `Digital_Ocean_backend/app/ingestion/contacts_worker.py:29`
+- Description: Unused import (`os`).
+- Risk explanation: minor code hygiene issue.
+- Runtime impact: none.
+- Production impact: negligible.
+
+N3
+- File: `continuous_ingest.py`
+- Description: Legacy daemon kept alongside active modular implementation.
+- Risk explanation: drift/confusion risk for operators.
+- Runtime impact: none unless manually invoked.
+- Production impact: operational ambiguity.
+
+
+================================================================================
+SECTION 12 — ARCHITECTURE SCORECARD (0–10)
+================================================================================
+
+- Ingestion architecture: 6.0
+- Idempotency safety: 4.5
+- Checkpoint correctness: 4.0
+- Failure resilience: 5.0
+- Concurrency correctness: 5.0
+- DB safety: 5.0
+- Deployment readiness: 5.0
+- Security posture: 3.0
+- Observability: 6.0
+- Production maturity: 4.5
+
+Rationale (high-level):
+- Strong points: bounded queues, explicit retries, overlap windows, scheduler state persistence, metrics endpoint.
+- Weak points: checkpoint durability gap, pool-sharing bug, incomplete webhook idempotency model, weak readiness/authn behavior, and shutdown supervision gaps.
+
+
+================================================================================
+SECTION 13 — FINAL VERDICT
+================================================================================
+
+Production Ready?
+- No (current state is not production-safe for high-integrity ingestion).
+
+Must Fix Before Production
+1. Fix `db_pool` stale import/rebinding and enforce single shared pool (`main.py:8`, `57`; `db.py:13-14`).
+2. Remove/redo progress checkpoint advancement so checkpoint only reflects durable DB writes (`messages_worker.py:433-434`).
+3. Resolve `webhook_events` uniqueness collision between message and status event IDs (`main.py:121-126`, `143-146`; schema `1716`).
+4. Add webhook authentication/signature validation (`main.py:133-257`).
+5. Fix contact pipeline failure propagation/deadlock path (`contacts_worker.py:202-205`, `238-241`, `259-260`).
+6. Make status insert idempotent under duplicate callbacks (`main.py:224-255`, schema `1786`).
+
+Can Wait (but should be planned)
+- Duplicate schema indexes/FKs cleanup.
+- Runtime DDL migration normalization.
+- Dependency pinning and deployment health gating.
+- Repository artifact cleanup.
+
+Architecturally Strong
+- Clear separation between API and ingestion modules.
+- Strong retry scaffolding and cursor-expiry handling.
+- Bounded queue designs and explicit lag monitoring.
+
+Architecturally Fragile
+- Checkpoint durability semantics.
+- Shared-table key design across heterogeneous event types.
+- Process-local assumptions (limiter/state) under scale-out.
+- Pool lifecycle coupling and readiness signaling.
+
+Is ingestion core enterprise-grade?
+- Partially. Scheduling, retries, and monitoring are advanced, but correctness gaps (checkpoint durability and deadlock paths) prevent enterprise-grade reliability.
+
+Is webhook layer robust?
+- No. It lacks authentication and has conflict/duplicate handling weaknesses for status events.
+
+Is scaling safe?
+- Single instance only, with caveats.
+- Horizontal scaling is unsafe without distributed rate limiting, singleton coordination, and checkpoint leadership controls.
+
+Is data loss possible?
+- Yes.
+- Primary mechanism: checkpoint advanced before durable writes in message ingestion path.
+

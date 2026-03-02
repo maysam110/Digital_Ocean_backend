@@ -11,12 +11,12 @@ This module contains shared components extracted from:
 Components:
   - AsyncRateLimiter   — token bucket rate limiter
   - CursorExpiredError — exception for expired API cursors
-  - DB                 — asyncpg connection pool with infinite retry
   - TurnClient         — Turn.io Data Export API client (messages)
   - TurnContactClient  — Turn.io Data Export API client (contacts)
   - extract_message_timestamp / _safe_parse_ts — timestamp helpers
 
-NO LOGIC WAS CHANGED — only moved here for shared use.
+This module intentionally does NOT create DB pools. Pool lifecycle is owned
+by FastAPI lifespan so only one pool exists process-wide.
 """
 
 import asyncio
@@ -24,11 +24,9 @@ import datetime
 import json
 import logging
 import os
-import sys
 import time
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
-import asyncpg
 import httpx
 from dotenv import load_dotenv
 
@@ -57,12 +55,6 @@ if not TURN_BEARER_TOKEN:
         "but webhook handler will remain available."
     )
 
-DB_HOST = os.getenv("DB_HOST")
-DB_PORT = int(os.getenv("DB_PORT", "5432"))
-DB_USER = os.getenv("DB_USER")
-DB_PASSWORD = os.getenv("DB_PASSWORD")
-DB_NAME = os.getenv("DB_NAME")
-
 # ---------------------------------------------------------------------------
 # Contact-specific ingestion constants
 # ---------------------------------------------------------------------------
@@ -80,6 +72,8 @@ SEQUENTIAL_RETRY_TIMEOUT_S = int(os.getenv("INGEST_RETRY_TIMEOUT", "600"))  # 10
 ERROR_BACKOFF_S = 300  # 5 minutes wait on error
 CONTACT_INTERVAL_S = int(os.getenv("CONTACT_INTERVAL_MINUTES", "60")) * 60
 STARTUP_STAGGER_S = int(os.getenv("STARTUP_STAGGER_SECONDS", "10"))
+MESSAGE_SERVER_ERROR_SPLIT_THRESHOLD = 5
+MIN_MESSAGE_WINDOW_SECONDS = 60
 
 # Fixed start date for the startup backfill and initial checkpoint.
 # On every service start, data is fetched from this date to NOW.
@@ -113,7 +107,7 @@ class AsyncRateLimiter:
     ``rate/period`` requests per second.
     """
 
-    def __init__(self, rate: int = 20, period: float = 1.0, burst: int = 50):
+    def __init__(self, rate: int = 20, period: float = 1.0, burst: int = 20):
         self.rate = rate
         self.period = period
         self.max_tokens = burst
@@ -150,7 +144,17 @@ class AsyncRateLimiter:
 
 class CursorExpiredError(Exception):
     """Raised when Turn.io returns 400 'Cursor has expired'."""
-    pass
+
+
+class WindowSplitRequiredError(Exception):
+    """
+    Raised when repeated 5xx errors require shrinking the current message window.
+    """
+
+    def __init__(self, from_date: str, until_date: str):
+        super().__init__(f"Window split required for range {from_date} -> {until_date}")
+        self.from_date = from_date
+        self.until_date = until_date
 
 
 # ===========================================================================
@@ -183,7 +187,7 @@ class TurnClient:
             limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
             follow_redirects=True,
         )
-        self.rate_limiter = rate_limiter or AsyncRateLimiter(rate=20, period=1.0, burst=50)
+        self.rate_limiter = rate_limiter or AsyncRateLimiter(rate=20, period=1.0, burst=20)
         self.semaphore = asyncio.Semaphore(10)
 
     # ── low-level helpers ─────────────────────────────────────────────────
@@ -261,6 +265,10 @@ class TurnClient:
                 log.error(f"Failed to create cursor: {e}")
                 raise
 
+        raise RuntimeError(
+            f"Failed to create {data_type} cursor after {max_retries} attempts"
+        )
+
     async def _fetch_data_export_page(self, data_type: str, cursor: str) -> Dict:
         """Fetch a single page of data using a cursor, with retry logic.
 
@@ -297,15 +305,21 @@ class TurnClient:
                     if "cursor has expired" in body or ("cursor" in body and "expired" in body):
                         log.warning("⏰ Cursor expired — will re-create from last offset")
                         raise CursorExpiredError("Cursor has expired") from e
-                if e.response.status_code == 429 or 500 <= e.response.status_code < 600:
+                if e.response.status_code == 429:
                     wait_time = min(base_delay * (2 ** attempt), 60)
-                    msg = "Rate limit hit (429)" if e.response.status_code == 429 else f"Server error ({e.response.status_code})"
                     log.warning(
-                        f"⚠️  {msg} fetching page, retrying in {wait_time}s..."
+                        f"⚠️  Rate limit hit (429) fetching page, retrying in {wait_time}s..."
                     )
                     if attempt < max_retries - 1:
                         await asyncio.sleep(wait_time)
                         continue
+                if 500 <= e.response.status_code < 600:
+                    # Let the outer message fetch loop count server failures and
+                    # trigger deterministic window splitting after N failures.
+                    log.warning(
+                        f"⚠️  Server error ({e.response.status_code}) fetching page; "
+                        "delegating retry/split decision to window controller"
+                    )
                 log.error(f"HTTP {e.response.status_code} error fetching data: {e.response.text}")
                 raise
             except Exception as e:
@@ -361,11 +375,51 @@ class TurnClient:
                     f"📦 Chunk {chunk_num}/{total_chunks}: "
                     f"{chunk_from} → {chunk_until}"
                 )
-                async for msg in self._fetch_messages_single_cursor(chunk_from, chunk_until):
+                async for msg in self._fetch_messages_with_window_shrink(
+                    chunk_from, chunk_until
+                ):
                     yield msg
                 chunk_start = chunk_end
         else:
+            async for msg in self._fetch_messages_with_window_shrink(
+                from_date, until_date
+            ):
+                yield msg
+
+    async def _fetch_messages_with_window_shrink(
+        self,
+        from_date: str,
+        until_date: str,
+    ) -> AsyncGenerator[Dict, None]:
+        """
+        Fetch one window and recursively shrink on repeated 5xx failures.
+
+        This guarantees we never skip a failed range: a failing window is split
+        into two smaller windows until it succeeds or reaches a minimum size.
+        """
+        try:
             async for msg in self._fetch_messages_single_cursor(from_date, until_date):
+                yield msg
+            return
+        except WindowSplitRequiredError:
+            start_dt = datetime.datetime.fromisoformat(from_date.replace("Z", "+00:00"))
+            end_dt = datetime.datetime.fromisoformat(until_date.replace("Z", "+00:00"))
+            span_seconds = (end_dt - start_dt).total_seconds()
+            if span_seconds <= MIN_MESSAGE_WINDOW_SECONDS:
+                raise RuntimeError(
+                    f"Window {from_date} -> {until_date} still fails at minimum size"
+                )
+
+            midpoint_dt = start_dt + (end_dt - start_dt) / 2
+            midpoint = midpoint_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+            log.warning(
+                f"🔪 Shrinking failing message window: "
+                f"{from_date} -> {until_date} => "
+                f"{from_date} -> {midpoint} and {midpoint} -> {until_date}"
+            )
+            async for msg in self._fetch_messages_with_window_shrink(from_date, midpoint):
+                yield msg
+            async for msg in self._fetch_messages_with_window_shrink(midpoint, until_date):
                 yield msg
 
     @staticmethod
@@ -415,6 +469,7 @@ class TurnClient:
             last_message_ts = from_date
             max_cursor_retries = 10  # prevent infinite re-creation loops
             cursor_retries = 0
+            server_error_retries = 0
 
             while cursor:
                 page_count += 1
@@ -440,19 +495,19 @@ class TurnClient:
                     continue
                 except httpx.HTTPStatusError as e:
                     if 500 <= e.response.status_code < 600:
-                        cursor_retries += 1
-                        if cursor_retries > max_cursor_retries:
+                        server_error_retries += 1
+                        if server_error_retries >= MESSAGE_SERVER_ERROR_SPLIT_THRESHOLD:
                             log.error(
-                                f"❌ Persistent server errors after {cursor_retries} "
-                                f"cursor re-creations — giving up"
+                                f"❌ Server errors persisted {server_error_retries} times "
+                                f"for {from_date} -> {until_date}; shrinking window"
                             )
-                            raise
+                            raise WindowSplitRequiredError(from_date, until_date)
                         log.warning(
                             f"🔄 Server {e.response.status_code} persisted after retries. "
                             f"Re-creating cursor from last offset: {last_message_ts} "
-                            f"(attempt {cursor_retries}/{max_cursor_retries})"
+                            f"(attempt {server_error_retries}/{MESSAGE_SERVER_ERROR_SPLIT_THRESHOLD})"
                         )
-                        await asyncio.sleep(30)  # cool-down before re-creating
+                        await asyncio.sleep(5)
                         cursor = await self._create_data_export_cursor(
                             "messages", last_message_ts, until_date,
                         )
@@ -462,6 +517,7 @@ class TurnClient:
 
                 # Reset cursor-retry counter on every successful page
                 cursor_retries = 0
+                server_error_retries = 0
 
                 data_items = data.get("data") or data.get("messages", [])
 
@@ -551,7 +607,7 @@ class TurnContactClient:
                 max_keepalive_connections=10
             ),
         )
-        self.limiter = rate_limiter or AsyncRateLimiter(rate=20, period=1.0, burst=50)
+        self.limiter = rate_limiter or AsyncRateLimiter(rate=20, period=1.0, burst=20)
         self.semaphore = asyncio.Semaphore(12)
 
     async def _create_contacts_cursor(
@@ -845,17 +901,11 @@ class TurnContactClient:
                     failed_chunks.append((chunk_id, chunk_from, chunk_until))
 
             finally:
-                # Use sys.stderr in finally to avoid NameError during shutdown
                 try:
                     async with chunk_lock:
                         active_chunks["count"] -= 1
-                except (RuntimeError, asyncio.CancelledError):
-                    pass
                 except Exception as e:
-                    try:
-                        sys.stderr.write(f"Error in chunk cleanup: {e}\n")
-                    except:
-                        pass
+                    log.error(f"Chunk-{chunk_id} cleanup failed: {e}", exc_info=True)
 
         # --- PHASE A: Stagger each chunk launch individually ---
         tasks = []
@@ -868,8 +918,6 @@ class TurnContactClient:
         while True:
             try:
                 contact = await asyncio.wait_for(fetch_queue.get(), timeout=2.0)
-                if contact is None:  # sentinel
-                    break
                 yield contact
             except asyncio.TimeoutError:
                 # Check if all parallel chunks are done and queue is empty
@@ -884,30 +932,33 @@ class TurnContactClient:
         # Drain any remaining items left in the queue after gather
         while not fetch_queue.empty():
             contact = fetch_queue.get_nowait()
-            if contact is not None:
-                yield contact
+            yield contact
 
-        # --- PHASE B: Retry failed chunks sequentially (with timeout) ---
+        # --- PHASE B: Retry failed chunks sequentially (strict no-skip) ---
+        # Hard guarantee: no failed chunk is silently skipped. Any unresolved
+        # chunk causes this generator to raise so callers can fail the cycle
+        # and retry from checkpoint overlap.
         if failed_chunks:
             log.warning(
                 f"\n🔄 {len(failed_chunks)} chunk(s) failed. "
                 f"Retrying sequentially (timeout: {SEQUENTIAL_RETRY_TIMEOUT_S}s)..."
             )
             retry_start = time.monotonic()
+            unresolved_chunks: List[Tuple[int, str, str, str]] = []
 
             for chunk_id, chunk_from, chunk_until in failed_chunks:
                 # Check overall retry timeout
                 elapsed = time.monotonic() - retry_start
                 if elapsed > SEQUENTIAL_RETRY_TIMEOUT_S:
-                    log.error(
-                        f"  ⏱️ Sequential retry timeout ({SEQUENTIAL_RETRY_TIMEOUT_S}s) exceeded. "
-                        f"Skipping remaining failed chunks."
+                    raise RuntimeError(
+                        f"Sequential retry timeout ({SEQUENTIAL_RETRY_TIMEOUT_S}s) "
+                        f"exceeded before retrying Chunk-{chunk_id}"
                     )
-                    break
 
                 log.info(f"  🔄 Retrying Chunk-{chunk_id}: {chunk_from} → {chunk_until}")
                 retry_count = 0
                 current_from = chunk_from
+                chunk_failure_reason: Optional[str] = None
                 try:
                     # Wait before retry to let rate limits clear
                     await asyncio.sleep(5)
@@ -918,7 +969,10 @@ class TurnContactClient:
                     while cursor:
                         # Check timeout inside retry loop too
                         if time.monotonic() - retry_start > SEQUENTIAL_RETRY_TIMEOUT_S:
-                            log.warning(f"  ⏱️ Timeout during Chunk-{chunk_id} retry. Stopping.")
+                            chunk_failure_reason = (
+                                f"timeout during Chunk-{chunk_id} retry after "
+                                f"{SEQUENTIAL_RETRY_TIMEOUT_S}s"
+                            )
                             break
 
                         try:
@@ -926,7 +980,9 @@ class TurnContactClient:
                         except CursorExpiredError:
                             retry_count += 1
                             if retry_count > CURSOR_MAX_RETRIES:
-                                log.error(f"  ❌ Chunk-{chunk_id} retry: cursor expired too many times")
+                                chunk_failure_reason = (
+                                    f"cursor expired {retry_count} times for Chunk-{chunk_id}"
+                                )
                                 break
                             cursor = await self._create_contacts_cursor(current_from, chunk_until)
                             continue
@@ -953,12 +1009,32 @@ class TurnContactClient:
                                 f"({page_count} pages)..."
                             )
 
-                    log.info(
-                        f"  ✓ Chunk-{chunk_id} (retry) complete: "
-                        f"{chunk_contact_count} contacts in {page_count} pages"
-                    )
+                    if chunk_failure_reason is None:
+                        log.info(
+                            f"  ✓ Chunk-{chunk_id} (retry) complete: "
+                            f"{chunk_contact_count} contacts in {page_count} pages"
+                        )
+                    else:
+                        log.error(f"  ❌ Chunk-{chunk_id} retry failed: {chunk_failure_reason}")
+                        unresolved_chunks.append(
+                            (chunk_id, chunk_from, chunk_until, chunk_failure_reason)
+                        )
                 except Exception as e:
-                    log.error(f"  ❌ Chunk-{chunk_id} retry also failed: {e}")
+                    reason = str(e)
+                    log.error(f"  ❌ Chunk-{chunk_id} retry also failed: {reason}")
+                    unresolved_chunks.append((chunk_id, chunk_from, chunk_until, reason))
+
+            if unresolved_chunks:
+                detail = "; ".join(
+                    [
+                        f"Chunk-{cid} {cfrom}->{cuntil}: {reason}"
+                        for cid, cfrom, cuntil, reason in unresolved_chunks
+                    ]
+                )
+                raise RuntimeError(
+                    "Contact fetch unresolved chunk(s) after sequential retry; "
+                    f"cycle must fail with no checkpoint advance: {detail}"
+                )
 
     async def get_contacts(
         self,
@@ -1048,56 +1124,6 @@ class TurnContactClient:
 
 
 # ===========================================================================
-# Database Connection Pool (self-contained)
-# ===========================================================================
-class DB:
-    """PostgreSQL connection pool manager with infinite retry."""
-
-    def __init__(self):
-        self.pool: Optional[asyncpg.pool.Pool] = None
-
-    def accept_pool(self, pool: asyncpg.pool.Pool) -> None:
-        """Accept an external connection pool instead of creating a new one."""
-        self.pool = pool
-        log.info("✓ Accepted external DB connection pool")
-
-    async def connect(self):
-        """Create connection pool. Retries forever until DB is reachable."""
-        if self.pool is not None:
-            log.info("✓ DB pool already set (external), skipping connect")
-            return
-        attempt = 0
-        while True:
-            attempt += 1
-            try:
-                self.pool = await asyncpg.create_pool(
-                    host=DB_HOST,
-                    port=DB_PORT,
-                    user=DB_USER,
-                    password=DB_PASSWORD,
-                    database=DB_NAME,
-                    min_size=2,
-                    max_size=15,
-                    command_timeout=60,
-                )
-                log.info("✓ Connected to PostgreSQL")
-                return
-            except Exception as exc:
-                wait_time = min(5 * attempt, 60)
-                log.error(
-                    f"🔌 DB connection failed (attempt {attempt}): {exc}. "
-                    f"Retrying in {wait_time}s..."
-                )
-                await asyncio.sleep(wait_time)
-
-    async def close(self):
-        """Close connection pool."""
-        if self.pool:
-            await self.pool.close()
-            log.info("✓ Database connection closed")
-
-
-# ===========================================================================
 # Timestamp extraction — Turn.io export payload
 # ===========================================================================
 
@@ -1156,7 +1182,7 @@ def _safe_parse_ts(raw) -> Optional[datetime.datetime]:
             epoch = epoch / 1000.0
         return datetime.datetime.fromtimestamp(epoch, tz=datetime.timezone.utc)
     except (ValueError, TypeError, OSError, OverflowError):
-        pass
+        epoch = None
 
     # --- ISO string ---
     try:
@@ -1168,6 +1194,6 @@ def _safe_parse_ts(raw) -> Optional[datetime.datetime]:
             dt = dt.replace(tzinfo=datetime.timezone.utc)
         return dt
     except (ValueError, TypeError):
-        pass
+        return None
 
     return None

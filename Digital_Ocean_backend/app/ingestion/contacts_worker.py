@@ -26,11 +26,11 @@ import asyncio
 import datetime
 import json
 import logging
-import os
 from typing import Optional
 
+import asyncpg
+
 from app.ingestion.base import (
-    DB,
     TurnContactClient,
     BATCH_SIZE,
     NUM_CHUNKS,
@@ -73,8 +73,8 @@ class ContactWorker:
         • Idempotent: safe to re-run
     """
 
-    def __init__(self, db: DB, client: TurnContactClient) -> None:
-        self.db = db
+    def __init__(self, pool: asyncpg.Pool, client: TurnContactClient) -> None:
+        self.pool = pool
         self.client = client
         self.shutdown_event = asyncio.Event()
 
@@ -84,25 +84,17 @@ class ContactWorker:
 
     async def ensure_checkpoint(self) -> None:
         """Ensure ingestion_state row id=2 exists for contacts."""
-        async with self.db.pool.acquire() as conn:
-            # Table is already created by MessageWorker, but be safe
+        async with self.pool.acquire() as conn:
             await conn.execute("""
-                CREATE TABLE IF NOT EXISTS ingestion_state (
-                    id   int PRIMARY KEY,
-                    last_external_timestamp timestamptz,
-                    updated_at              timestamptz DEFAULT now()
-                )
-            """)
-            await conn.execute(f"""
                 INSERT INTO ingestion_state (id, last_external_timestamp)
-                VALUES (2, '{STARTUP_FROM_DATE}'::timestamptz)
+                VALUES (2, $1::timestamptz)
                 ON CONFLICT (id) DO NOTHING
-            """)
-        log.info("✓ ingestion_state table ready (contacts, id=2)")
+            """, STARTUP_FROM_DATE)
+        log.info("✓ ingestion_state row ready (contacts, id=2)")
 
     async def get_checkpoint(self) -> datetime.datetime:
         """Return the current contact checkpoint timestamp."""
-        async with self.db.pool.acquire() as conn:
+        async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT last_external_timestamp FROM ingestion_state WHERE id = 2"
             )
@@ -129,7 +121,7 @@ class ContactWorker:
             log.warning(f"⚠️ Contact checkpoint clamped from future {max_ts} to NOW")
             max_ts = now_utc
 
-        async with self.db.pool.acquire() as conn:
+        async with self.pool.acquire() as conn:
             await conn.execute("""
                 UPDATE ingestion_state
                 SET last_external_timestamp = $1,
@@ -172,39 +164,23 @@ class ContactWorker:
             """Consumer: pull from queue and batch insert into DB."""
             log.info(f"  ⚡ Consumer-{consumer_id} started")
             batch = []
-
-            try:
+            async with self.pool.acquire() as conn:
                 while True:
                     try:
-                        # shorter timeout to check producers_done more frequently
                         item = await asyncio.wait_for(ingest_queue.get(), timeout=1.0)
-                        if item is None:  # Sentinel
-                            break
                         batch.append(item)
-
                         if len(batch) >= BATCH_SIZE:
-                            async with self.db.pool.acquire() as conn:
-                                await self._flush_batch(conn, batch, stats, consumer_id)
+                            await self._flush_batch(conn, batch, stats, consumer_id)
                             batch = []
                     except asyncio.TimeoutError:
+                        if batch:
+                            await self._flush_batch(conn, batch, stats, consumer_id)
+                            batch = []
                         if producers_done.is_set() and ingest_queue.empty():
                             break
-                        if batch:
-                            async with self.db.pool.acquire() as conn:
-                                await self._flush_batch(conn, batch, stats, consumer_id)
-                            batch = []
-                        continue
-
-                # Final flush
                 if batch:
-                    async with self.db.pool.acquire() as conn:
-                        await self._flush_batch(conn, batch, stats, consumer_id)
-            except Exception as e:
-                log.error(
-                    f"  ❌ Consumer-{consumer_id} failed: {e}", exc_info=True
-                )
-            finally:
-                log.info(f"  🏁 Consumer-{consumer_id} finished")
+                    await self._flush_batch(conn, batch, stats, consumer_id)
+            log.info(f"  🏁 Consumer-{consumer_id} finished")
 
         async def contact_producer():
             """Producer: fetch contacts and enqueue for batching."""
@@ -232,8 +208,8 @@ class ContactWorker:
                                 ts_dt = ts_dt.replace(tzinfo=datetime.timezone.utc)
                             if max_contact_ts is None or ts_dt > max_contact_ts:
                                 max_contact_ts = ts_dt
-                        except (ValueError, TypeError):
-                            pass
+                        except (ValueError, TypeError) as exc:
+                            log.debug(f"Skipping unparsable contact timestamp {ts_raw}: {exc}")
 
                     if ingest_queue.full():
                         log.warning(f"  ⚠️ [CONTACTS] Ingest queue full, waiting for DB flush...")
@@ -250,42 +226,29 @@ class ContactWorker:
 
                 stats["contacts"] = count
                 log.info(f"✓ Contact fetch complete: {count} total")
-
-            except Exception as e:
-                log.error(f"❌ Contact fetch failed: {e}", exc_info=True)
-                raise
             finally:
-                # Always send sentinels so consumers never hang (even on exception)
-                for _ in range(NUM_CONSUMERS):
-                    await ingest_queue.put(None)
+                producers_done.set()
 
         log.info("\n📥 Starting parallel fetch and batch insert (contacts)...")
         log.info(f"   Batch size: {BATCH_SIZE} contacts per transaction")
         log.info(f"   Queue size: {CONSUMER_QUEUE_SIZE} contacts (memory bounded)")
 
-        try:
-            consumer_tasks = [
-                asyncio.create_task(batch_consumer(i))
-                for i in range(NUM_CONSUMERS)
-            ]
-            producer_task = asyncio.create_task(contact_producer())
+        consumer_tasks = [
+            asyncio.create_task(batch_consumer(i))
+            for i in range(NUM_CONSUMERS)
+        ]
+        producer_task = asyncio.create_task(contact_producer())
+        pipeline_tasks = [producer_task, *consumer_tasks]
 
-            await producer_task
-            producers_done.set()
-            await asyncio.gather(*consumer_tasks)
+        try:
+            await asyncio.gather(*pipeline_tasks)
         except (Exception, asyncio.CancelledError) as exc:
-            log.error(f"❌ Contact ingestion pipeline error or cancellation: {exc}")
-            # Ensure everything is cleaned up if we exit early
-            producer_task.cancel()
-            for t in consumer_tasks:
-                t.cancel()
-            
-            # Wait for tasks to acknowledge cancellation
-            await asyncio.gather(producer_task, *consumer_tasks, return_exceptions=True)
-            raise
-        finally:
-            # Double safety: set the event so consumers don't hang if they weren't cancelled
+            log.error(f"❌ Contact ingestion pipeline error or cancellation: {exc}", exc_info=True)
             producers_done.set()
+            for task in pipeline_tasks:
+                task.cancel()
+            await asyncio.gather(*pipeline_tasks, return_exceptions=True)
+            raise
 
         log.info("\n" + "=" * 70)
         log.info(f"✅ CONTACT INGESTION CYCLE COMPLETE")
@@ -315,7 +278,7 @@ class ContactWorker:
             await conn.executemany(
                 """
                 INSERT INTO webhook_events (provider, event_type, external_event_id, payload, processed)
-                VALUES ($1, $2, $3, $4, FALSE)
+                VALUES ($1, $2, $3, $4::jsonb, FALSE)
                 ON CONFLICT (provider, external_event_id) DO UPDATE SET
                     payload = EXCLUDED.payload,
                     processed = FALSE
