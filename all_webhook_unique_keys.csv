@@ -1,0 +1,145 @@
+json_key,sample_value
+_vnd,"{""v1"": {""chat"": {""uuid"": ""e1f66b7e-4d63-443e-a940-35ec05737065"", ""owner"": ""+923252762447"", ""state"": ""OPEN"", ""permalink"": ""https://whatsapp.turn.io/app/c/e1f66b7e-4d63-443e-a940-35ec05737065"", ""updated_at"": ""2026-01-22T09:04:11.055133Z"", ""assigned_to"": null, ""inserted_at"": ""2025-05-29T06:13:46.441062Z"", ""contact_uuid"": ""9365b677-37a2-4e06-a428-f26f7a86fb1f"", ""state_reason"": ""Re-opened by inbound message."", ""unread_count"": 43}, ""uuid"": ""269cc886-dd27-a742-4aeb-9ede951c9323"", ""author"": {""id"": ""923252762447"", ""name"": ""mobeenakhtar474"", ""type"": ""OWNER""}, ""labels"": [], ""faq_uuid"": null, ""card_uuid"": null, ""direction"": ""inbound"", ""in_reply_to"": null, ""inserted_at"": ""2025-06-11T06:29:27.346999Z"", ""last_status"": null, ""rendered_content"": null, ""on_fallback_channel"": false, ""last_status_timestamp"": null}}"
+_vnd.v1,"{""chat"": {""uuid"": ""ddce6e1d-2f48-4eed-9e34-570ec8b8f455"", ""owner"": ""+923024958377"", ""state"": ""OPEN"", ""permalink"": ""https://whatsapp.turn.io/app/c/ddce6e1d-2f48-4eed-9e34-570ec8b8f455"", ""updated_at"": ""2026-01-20T12:36:41.552275Z"", ""assigned_to"": null, ""inserted_at"": ""2025-06-12T04:02:26.005733Z"", ""contact_uuid"": ""2a8c7f91-2c04-4927-ad35-4efcb4577cce"", ""state_reason"": ""Re-opened by inbound message."", ""unread_count"": 32}, ""uuid"": ""c10751f8-4180-ed63-c91e-56fd06bb8093"", ""author"": {""id"": ""a4fad99f-42b3-44ff-93ba-588e08aee330"", ""name"": ""Main Menu - Aspiring"", ""type"": ""STACK"", ""block_id"": ""bf6e703e-689b-5b7c-8e5f-8e489f8c46b9"", ""session_id"": ""1c417795-ed72-49de-ae52-83b5e50700b1"", ""block_is_ai"": false}, ""labels"": [], ""faq_uuid"": null, ""card_uuid"": null, ""direction"": ""outbound"", ""in_reply_to"": null, ""inserted_at"": ""2025-10-08T05:59:55.755139Z"", ""last_status"": ""read"", ""rendered_content"": null, ""on_fallback_channel"": false, ""last_status_timestamp"": ""2025-10-08T05:59:56.000000Z""}"
+_vnd.v1.author,"{""id"": ""a013c731-359b-4997-9cf5-db33d4a5d611"", ""name"": ""571"", ""type"": ""REMINDER""}"
+_vnd.v1.author.block_id,"""49030787-a858-5f39-b531-0d67e5975fc0"""
+_vnd.v1.author.block_is_ai,false
+_vnd.v1.author.id,"""0643708f-0313-404e-9ffe-35b46491efc1"""
+_vnd.v1.author.journey_card_uuid,"""76fbc981-c2dc-5443-9998-1f0ec65329e4"""
+_vnd.v1.author.journey_name,"""Onboarding - V-2.0 - Final"""
+_vnd.v1.author.journey_uuid,"""0643708f-0313-404e-9ffe-35b46491efc1"""
+_vnd.v1.author.name,"""Reminder 1"""
+_vnd.v1.author.request_id,"""GF-Op8mFw2W0P1sHoC7E"""
+_vnd.v1.author.session_id,"""e612fec0-613b-4ebe-b820-6c896a11c642"""
+_vnd.v1.author.type,"""STACK"""
+_vnd.v1.card_uuid,null
+_vnd.v1.chat,"{""uuid"": ""b4b46373-8c1b-4ce6-a992-2cbddfac2075"", ""owner"": ""+923240746241"", ""state"": ""CLOSED"", ""permalink"": ""https://whatsapp.turn.io/app/c/b4b46373-8c1b-4ce6-a992-2cbddfac2075"", ""updated_at"": ""2026-01-20T13:50:25.671902Z"", ""assigned_to"": null, ""inserted_at"": ""2025-10-22T11:29:57.024115Z"", ""contact_uuid"": ""d8c9eb98-8882-4b73-84ce-b958bc5617f5"", ""state_reason"": ""Chat closed due to inactivity"", ""unread_count"": 0}"
+_vnd.v1.chat.assigned_to,null
+_vnd.v1.chat.contact_uuid,"""955cab51-21df-4558-9a05-bb3d85771830"""
+_vnd.v1.chat.inserted_at,"""2025-06-19T04:04:43.993150Z"""
+_vnd.v1.chat.owner,"""+923244838555"""
+_vnd.v1.chat.permalink,"""https://whatsapp.turn.io/app/c/d27f4db8-6dcb-49b7-b240-1ca727c05d72"""
+_vnd.v1.chat.state,"""OPEN"""
+_vnd.v1.chat.state_reason,"""Re-opened by inbound message."""
+_vnd.v1.chat.unread_count,5
+_vnd.v1.chat.updated_at,"""2026-01-10T12:59:22.972749Z"""
+_vnd.v1.chat.uuid,"""c74e0d01-9449-48ca-8dc7-4046054f25b5"""
+_vnd.v1.direction,"""inbound"""
+_vnd.v1.faq_uuid,null
+_vnd.v1.in_reply_to,null
+_vnd.v1.inserted_at,"""2025-10-22T15:08:40.445783Z"""
+_vnd.v1.labels,[]
+_vnd.v1.labels[0],Structure exploration...
+_vnd.v1.last_status,"""read"""
+_vnd.v1.last_status_timestamp,null
+_vnd.v1.on_fallback_channel,false
+_vnd.v1.rendered_content,null
+_vnd.v1.uuid,"""bc3dafff-8f6c-ffdb-37eb-0861fb93e8af"""
+audio,"{""id"": ""e06c9e9a-8006-4e2c-983d-a70c3015f7ca-Reframingexercise.m4a"", ""filename"": ""Reframing exercise.m4a"", ""mime_type"": ""audio/mp4""}"
+audio.filename,"""Reframing exercise.m4a"""
+audio.id,"""646215571917228.ogg"""
+audio.link,"""https://drive.google.com/uc?export=download&id=1JyDqbgT4JpREoJgvPgUOEnfVE9p6lsVO"""
+audio.mime_type,"""audio/ogg; codecs=opus"""
+audio.sha256,"""LnXDMbZc8GTTuYezQR92RukxeUDKLY03yUMn9KATTGg="""
+audio.url,"""https://lookaside.fbsbx.com/whatsapp_business/attachments/?mid=761835406362557&source=webhook&ext=1768914353&hash=ARn54Yais3w4kmkUbUmHTF2xVtgtmvXMwvBRZOBJwpn9Qw"""
+audio.voice,true
+button,"{""text"": ""Job Ki Tiyari krni h"", ""payload"": ""turn-start-journey:180ac864-72c3-44f0-9e9b-b330bb4392fc""}"
+button.payload,null
+button.text,"""Lets Start!"""
+contacts,"[{""name"": {""last_name"": ""GC"", ""first_name"": ""Kips"", ""middle_name"": ""Admin"", ""formatted_name"": ""Kips Admin GC""}, ""phones"": [{""type"": ""MOBILE"", ""phone"": ""+92 332 8807144"", ""wa_id"": ""923328807144""}]}]"
+contacts[0],Structure exploration...
+context,"{""id"": ""wamid.HBgMOTIzMTkxNDMzMDU4FQIAERgSNTZBQjU3NkFCNjUwOEQ4MjlGAA=="", ""from"": ""+923141851055"", ""mentions"": []}"
+context.forwarded,true
+context.frequently_forwarded,true
+context.from,"""+923141851055"""
+context.id,"""wamid.HBgMOTIzMDkzNTE5ODUwFQIAERgSMDg3M0FGMUE3MTk1ODA3MEU3AA=="""
+context.mentions,[]
+context.mentions[0],Structure exploration...
+document,"{""id"": ""c573808b-352f-45df-abdc-e0cd6d64f7fb-TIKTOKStoryboardTemplate.docx"", ""caption"": null, ""filename"": ""TIKTOK Storyboard Template.docx"", ""mime_type"": ""application/vnd.openxmlformats-officedocument.wordprocessingml.document""}"
+document.caption,null
+document.filename,"""Social Media Content Calendar Template.docx"""
+document.id,"""2e1c7b98-4a77-4af4-b3aa-3938f14bcb8c-Beforeandaftereditingchecklist.pdf"""
+document.mime_type,"""application/pdf"""
+document.sha256,"""pY2llis+/8t55hDQa8ssf7pFl9QaD4yKDmV67Pkzo04="""
+document.url,"""https://lookaside.fbsbx.com/whatsapp_business/attachments/?mid=1307409613929505&source=webhook&ext=1760515633&hash=ARlo72w3rPoxkFe5mLtglVFMYbhOrTkLp_ZHSm_f1st0Cw"""
+from,"""923141851055"""
+id,"""wamid.HBgMOTIzNDY3OTgwMTI4FQIAERgSOURDOEUwNzM5RkMwQTlGREIyAA=="""
+image,"{""id"": ""bf599882-0fcd-420c-a29f-2c494cea272b-ERROR.jpg"", ""caption"": null, ""filename"": ""ERROR.jpg"", ""mime_type"": ""image/jpeg""}"
+image.caption,null
+image.filename,"""ERRO 2.png"""
+image.id,"""e589bd8e-7f5e-46d1-b7cd-0e3b0174a7e7-ERRO2.png"""
+image.link,"""https://circle-women.sirv.com/Certificate%20Baji%20X%20Indrive.png?text.0.text=@name&text.0.position.x=-42%25&text.0.position.y=-48%25&text.0.size=16"""
+image.mime_type,"""image/png"""
+image.sha256,"""7TQ2D/hPwHtfEQxRcoYKSvjLeGHkG2TMzKf7GPAgUD8="""
+image.url,"""https://lookaside.fbsbx.com/whatsapp_business/attachments/?mid=2052040325623086&source=webhook&ext=1760518578&hash=ARmvryS-lWWy0D43mhgHrwyhYqss0Ou62RqyCjKOg9kccA"""
+inserted_at,"""2025-10-11T08:56:16.959450Z"""
+interactive,"{""type"": ""button_reply"", ""button_reply"": {""id"": ""Sm9iIEtpIFRpeWFyaSBrcm5pIGg"", ""title"": ""Job Ki Tiyari krni h""}}"
+interactive.action,"{""button"": ""Choose Karain"", ""sections"": [{""rows"": [{""id"": ""8J+NsktoYW5hIGJhbmFuYSA"", ""title"": ""🍲Khana banana ""}, {""id"": ""8J+RlyBLYXByYXkgL0pld2VscnkgL0JhZw"", ""title"": ""👗 Kapray /Jewelry /Bag""}, {""id"": ""8J+SuyBGcmVlbGFuY2U"", ""title"": ""💻 Freelance""}, {""id"": ""8J+TmiBPbmxpbmUgVHVpdGlvbg"", ""title"": ""📚 Online Tuition""}, {""id"": ""4pyoIEtvaSBhdXI"", ""title"": ""✨ Koi aur""}]}]}"
+interactive.action.button,"""Choose krein"""
+interactive.action.buttons,"[{""type"": ""reply"", ""reply"": {""id"": ""TGV0J3MgZG8gdGhlIHF1aXog"", ""title"": ""Let's do the quiz ""}}]"
+interactive.action.buttons[0],Structure exploration...
+interactive.action.name,"""send_location"""
+interactive.action.sections,"[{""rows"": [{""id"": ""MyBXZWVrIE9ubGluZSBUcmFpbmluZw=="", ""title"": ""3 Week Online Training""}, {""id"": ""QnVzaW5lc3MgVHV0b3JpYWxz"", ""title"": ""Business Tutorials""}, {""id"": ""WmFyb29yaSBUZW1wbGF0ZXM="", ""title"": ""Zaroori Templates""}, {""id"": ""TWFraHN1cyB0b3BpY3M="", ""title"": ""Makhsus topics""}, {""id"": ""RXhoaWJpdGlvbiBpbmZv"", ""title"": ""Exhibition info""}]}]"
+interactive.action.sections[0],Structure exploration...
+interactive.body,"{""text"": ""Kis type ka business karne mein interested hain?""}"
+interactive.body.text,"""DLP ki training ki tayari."""
+interactive.button_reply,"{""id"": ""RG9uZSBXYXRjaGluZw"", ""title"": ""Done Watching""}"
+interactive.button_reply.id,"""RG9uZSBXYXRjaGluZw"""
+interactive.button_reply.title,"""Done Watching"""
+interactive.call_permission_reply,"{""response"": ""accept"", ""is_permanent"": true, ""response_source"": ""user_action""}"
+interactive.call_permission_reply.expiration_timestamp,1761238583
+interactive.call_permission_reply.is_permanent,true
+interactive.call_permission_reply.response,"""accept"""
+interactive.call_permission_reply.response_source,"""user_action"""
+interactive.footer,"{""text"": ""Good luck!""}"
+interactive.footer.text,"""Good luck!"""
+interactive.header,"{""type"": ""document"", ""document"": {""id"": ""1183539957143897"", ""filename"": ""Business Roadmap.pdf""}}"
+interactive.header.document,"{""id"": ""790153883884531"", ""filename"": ""Day 1 templates.pdf""}"
+interactive.header.document.filename,"""Document.docx"""
+interactive.header.document.id,"""1182818097095237"""
+interactive.header.image,"{""id"": ""1484130232710894""}"
+interactive.header.image.id,"""1484130232710894"""
+interactive.header.text,"""Header"""
+interactive.header.type,"""video"""
+interactive.header.video,"{""id"": ""1377324880473906""}"
+interactive.header.video.id,"""676004938456693"""
+interactive.list_reply,"{""id"": ""QnVzaW5lc3MgQmFyaGFuYSBoYWk"", ""title"": ""Business Barhana hai""}"
+interactive.list_reply.id,"""U3ltcHRvbXMgIA"""
+interactive.list_reply.title,"""Skin Care"""
+interactive.type,"""button_reply"""
+location,"{""latitude"": 29.7322529, ""longitude"": 71.3552928}"
+location.address,"""راس الخيمة, AE"""
+location.latitude,24.9117927
+location.longitude,67.0249693
+location.name,"""Al Hamad Labour Camp"""
+number_id,5467
+preview_url,false
+recipient_type,"""individual"""
+sticker,"{""id"": ""1505126087118549.webp"", ""sha256"": ""Xf8bm6qfpBLLgPiLfqLvyDVq7/TY6I6UdFphHCdJUyk="", ""animated"": true, ""mime_type"": ""image/webp""}"
+sticker.animated,true
+sticker.id,"""808383758236144.webp"""
+sticker.mime_type,"""image/webp"""
+sticker.sha256,"""0f5wcXM/C/W+WE2wQRr6cZVzgvGj1FCrDQFH3Q1pLgc="""
+sticker.url,"""https://lookaside.fbsbx.com/whatsapp_business/attachments/?mid=2031111267646624&source=webhook&ext=1760512656&hash=ARk-n0f5q8Y8w6laBebr5ciT_g2iciMzaB69iRkCRUcTWw"""
+template,"{""name"": ""incomplete_onboarding_1"", ""language"": {""code"": ""en_GB""}, ""namespace"": ""99a07100_b434_4eb5_8ab2_00cdd22e7668"", ""components"": [{""type"": ""header"", ""parameters"": [{""text"": ""Handmade collection "", ""type"": ""text""}]}, {""type"": ""body"", ""parameters"": []}, {""type"": ""button"", ""index"": 0, ""sub_type"": ""quick_reply"", ""parameters"": [{""type"": ""payload"", ""payload"": ""{\""idx\"":0,\""tl\"":\""en_GB\"",\""tn\"":\""incomplete_onboarding_1\""}""}]}]}"
+template.components,"[{""type"": ""button"", ""index"": 0, ""sub_type"": ""quick_reply"", ""parameters"": [{""type"": ""payload"", ""payload"": ""turn-start-journey:2e37ba5e-e32d-41f3-b604-46b29f769b4b""}]}]"
+template.components[0],Structure exploration...
+template.language,"{""code"": ""en"", ""policy"": ""deterministic""}"
+template.language.code,"""en_GB"""
+template.language.policy,"""deterministic"""
+template.name,"""mental_health_tips_abo"""
+template.namespace,"""99a07100_b434_4eb5_8ab2_00cdd22e7668"""
+text,"{""body"": ""Kaneez Bahoo,Aapki age kya hai?""}"
+text.body,"""Thank you for contacting hum online business! Please let us know how we can help you."""
+timestamp,"""1749621647"""
+to,"""923088892206"""
+type,"""template"""
+updated_at,"""2026-03-04T11:22:05.320346Z"""
+uuid,"""82dfc750-e3f8-40ac-b18d-e2902014b735"""
+video,"{""id"": ""ec77ce13-1c24-482f-8ea9-7d5a7d28fb24-FromNervoustoConfidentin2mins!.mp4"", ""caption"": null, ""filename"": ""From Nervous to Confident in 2 mins!.mp4"", ""mime_type"": ""video/mp4""}"
+video.caption,null
+video.filename,"""Calm in a Minute – 4 Quick Self-Care Ideas  (3).mp4"""
+video.id,"""ae50445f-e0f0-41ec-9cbe-bf297fc59974-CalminaMinute–4QuickSelf-CareIdeas(3).mp4"""
+video.mime_type,"""video/mp4"""
+video.sha256,"""5fKeoazTV1W1ihyTiwfuPp3DXGRHns68yO/9yJZ8C3Y="""
+video.url,"""https://lookaside.fbsbx.com/whatsapp_business/attachments/?mid=1774221457301911&source=webhook&ext=1760551610&hash=ARn9qnhOTR-PZVdYgrK2TespcbWughSdNsH_peNiLGfoMA"""

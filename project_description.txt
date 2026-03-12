@@ -1,0 +1,47 @@
+# Project Description: Digital Ocean Ingestion Backend
+
+## Overview
+This project is a high-availability, enterprise-grade data ingestion service built with **FastAPI** and **PostgreSQL**. Its primary purpose is to reliably fetch, sync, and store message and contact data from the **Turn.io Data Export API** while also providing a real-time webhook ingestion endpoint.
+
+## Core Features
+
+### 1. High-Performance Ingestion Workers
+The system runs two specialized background workers orchestrated by an `IngestionManager`:
+- **MessageWorker**: 
+    - Performs **Incremental Synchronization** every 30 seconds to pull the latest messages.
+    - Includes a **Self-Healing Watchdog** that triggers emergency recovery if ingestion lag exceeds 15 minutes.
+    - Conducts **Daily Recovery Sweeps** (3-day window) and **Weekly Integrity Audits** (30-day window) to ensure 100% data consistency.
+    - Exposes **Prometheus-compatible metrics** (port 9102) for real-time monitoring of lag and throughput.
+- **ContactWorker**: 
+    - Handles **Continuous Contact Syncing** every 60 minutes.
+    - Performs a **Startup Backfill** on service restart to refresh mutable contact details (like names and profiles).
+    - Utilizes **Parallel Chunk Fetching** to efficiently handle large volumes of contact data.
+
+### 2. Real-Time Webhook Handler
+A dedicated `/webhooks/turn` endpoint receives raw payloads from Turn.io. It uses an **idempotent insertion strategy** (saving to `webhook_events` table) to prevent duplicate processing while ensuring every event is captured.
+
+### 3. Enterprise API Integration
+The system interacts with Turn.io using robust, custom-built async clients (`TurnClient` and `TurnContactClient`) featuring:
+- **Token Bucket Rate Limiting**: Respects Turn.io’s limit of 600 requests per 30 seconds.
+- **Automatic Range Splitting**: Automatically breaks large date ranges into smaller chunks to prevent API timeouts or server internal errors.
+- **Resilient Cursor Management**: Handles cursor expiry and transient network failures with exponential backoff and automatic session recovery.
+
+### 4. Robust Database & Lifecycle Management
+- **Asynchronous DB Pool**: Uses `asyncpg` for high-performance, non-blocking PostgreSQL operations via a shared connection pool.
+- **Durable Checkpointing**: Ingestion progress is tracked in the `ingestion_state` table, ensuring the service can resume exactly where it left off after restarts.
+- **Graceful Shutdown**: Properly closes database connections and cancels background tasks to prevent data corruption.
+
+## Project Structure
+- `Digital_Ocean_backend/app/main.py`: The FastAPI application entry point.
+- `Digital_Ocean_backend/app/ingestion/`: The core logic containing workers, managers, and API clients.
+- `Digital_Ocean_backend/db.py`: Database connection and pool management.
+- `Digital_Ocean_Schema.sql`: Complete PostgreSQL schema definition.
+- `continuous_ingest.py`: Legacy standalone ingestion script.
+- `Dockerfile`: Configuration for containerized deployment.
+
+## Technical Stack
+- **Languages**: Python 3.x
+- **Frameworks**: FastAPI, Uvicorn
+- **Database**: PostgreSQL (asyncpg)
+- **Monitoring**: Prometheus (via custom metrics server)
+- **Configuration**: Environment variables (.env)
